@@ -1,0 +1,147 @@
+{
+ "component": "Persona distillation methodology — turning a real public figure into a high-fidelity system prompt for a real-time spoken English debate opponent",
+ "verdict": "works-native-fast",
+ "recommendation": "Ship the template at ./personas/_TEMPLATE-debate-opponent.md (verified: parses with voxemw/config.py::parse_persona_file; strips to ~3,950 tokens of clean prompt via one regex line). It is the VoxEMW mojingnvwu.md skeleton restructured for adversarial roleplay of a real, sourced person, with four sections that have no counterpart in the mirror-witch: Section 0 (AI disclosure + hard boundaries, placed FIRST), Section 6 (Sourced Position Ledger — every position carries a cite-id, and a position without an ID cannot be asserted), Section 9 (the concede/narrow/reframe ladder with a two-turn cap before real concession), and Section 11 (CEFR difficulty governor). Build the ledger with nuwa's 6-agent research pipeline plus a 7th \"adversarial\" agent that hunts recorded instances of the figure LOSING an exchange — nothing else produces an honest Section 9. Validate with nuwa's fidelity scorecard re-weighted so sourcing integrity is 25 points with ANY invented quote or statistic an automatic fail, and keep its iron rule that the answering agent and the grading agent are different agents.",
+ "why": "The mojingnvwu.md persona is a genuinely good skeleton because it was written against a real-time voice pipeline, and its rules are pipeline constraints disguised as style notes. The reference code proves this: `stream_batch_sentences: 1` (configs/assistant.yaml:46) hands the TTS sentence #1 the instant the LLM finishes it, so the \"first sentence must be short\" rule IS most of the time-to-first-audio budget, not a stylistic tic; `strip_stage_directions()` (voxemw/pipeline/tts_voxcpm2.py:101) exists as a code backstop because models emit \"(laughs)\" anyway, proving the prompt rule alone is insufficient. The whole markdown body is injected verbatim as `instructions` in session.update (voxemw/gateway/orchestrator.py:69-85) — no wrapper, no RAG — so the persona file IS the system prompt and must be budgeted like one.\n\nAdapting it to a real person inverts three things. (a) The witch's engine is \"route every topic back to praising the user\"; a debate persona needs the inverse stated as an explicit engine, or the base model's helpfulness training sands it into agreeable conversation within about four turns. (b) A fictional character can be invented; a real one cannot — the dominant failure of every \"debate <real person>\" bot is confabulating plausible specifics (statistics never cited, positions never held) and delivering them in the figure's voice with total confidence, which a language learner has no way to detect. The ledger fixes this structurally by converting \"don't hallucinate\" — an instruction models fail at — into \"only use rows from this table\", which they follow far better. (c) The witch never loses an argument because there is nothing to be wrong about; a real person does, and HOW he loses is among the most characteristic things about him. Get it wrong in either direction and the tool breaks: a figure who never yields becomes a wall and the learner gives up, while one who folds politely becomes a therapist with an accent and has no practice value.\n\nThe \"works-native-fast\" verdict is about runtime cost, not research cost. The persona is static text injected once per session, so with prefix caching you pay prefill once at session start and every later turn reuses the KV cache — it does not sit on the per-turn 2.0s budget at all. The only per-turn lever this component owns is the 8-word first-sentence cap, and that lever runs the right direction.",
+ "evidence": [
+  {
+   "claim": "The persona markdown body is injected verbatim as the system prompt — there is no summariser or RAG layer, so the file must be budgeted as a system prompt",
+   "detail": "voxemw/gateway/orchestrator.py:69-85, build_session_update(persona_id, persona_text, ...) sets \"instructions\": persona_text directly. voxemw/config.py::parse_persona_file returns {name,label,text,ref_wav,ref_text,voice_control,voice_seed}; `text` is the raw markdown body after frontmatter. Confirmed by running the real parser against the new template.",
+   "source_url": "https://github.com/emwstudio/VoxEMW/blob/63560df1512d4778dce86e975954bff5899de692/voxemw/gateway/orchestrator.py",
+   "strength": "strong"
+  },
+  {
+   "claim": "The 'first sentence must be short' rule is a latency mechanism, not a style preference",
+   "detail": "configs/assistant.yaml:46 sets `stream_batch_sentences: 1`, so TTS receives sentence #1 as soon as the LLM emits it. Time-to-first-audio = time-to-generate-first-sentence + TTS first chunk. assistant.yaml:48 sets `reasoning_effort: \"none\"` with the author's own comment that the thinking model burns ~2s before speaking. Both are direct evidence that the persona's opening-beat rule is load-bearing for the 2.0s target.",
+   "source_url": "https://github.com/emwstudio/VoxEMW/blob/63560df1512d4778dce86e975954bff5899de692/configs/assistant.yaml",
+   "strength": "strong"
+  },
+  {
+   "claim": "The 'no parenthetical stage directions' prompt rule is known to be insufficient on its own and is backed by code",
+   "detail": "voxemw/pipeline/tts_voxcpm2.py:101 calls strip_stage_directions() on TTS input with the comment that it removes stage directions the LLM occasionally emits, to stop them being read aloud. The persona file forbids them AND the pipeline strips them — belt and braces. The template keeps both.",
+   "source_url": "https://github.com/emwstudio/VoxEMW/blob/63560df1512d4778dce86e975954bff5899de692/voxemw/pipeline/tts_voxcpm2.py",
+   "strength": "strong"
+  },
+  {
+   "claim": "mojingnvwu.md's structure is: frontmatter voice params + roleplay rules, voice-scenario specialisation, speech style, identity card, core traits, bucket-classifying answer workflow, deflection handbook, fixed verbatim bits",
+   "detail": "Read in full. Its most transferable line is in the deflection handbook: for a new topic she has no stance on, use only deflection and 'never invent a definite position for her'. That single rule is the seed of the template's Section 6 ledger discipline. Its anti-drift and recovery rules (don't apologise, don't explain, absorb it in the next line) transfer verbatim.",
+   "source_url": "https://github.com/emwstudio/VoxEMW/blob/63560df1512d4778dce86e975954bff5899de692/personas/mojingnvwu.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "nuwa (女娲) runs a 6-parallel-agent research pipeline writing to fixed files, with human checkpoints between phases",
+   "detail": "Phase 0 intake/triage → Phase 0.5 create self-contained skill dir → Phase 1 six agents writing references/research/01-writings.md through 06-timeline.md → Phase 1.5 research review checkpoint → Phase 2 synthesis → Phase 2.5 checkpoint → Phase 3 build → Phase 4 validation → Phase 5 dual-agent refinement. Hard rule: research not written to file counts as not done, and all files must live inside the skill dir so the skill is self-contained and distributable.",
+   "source_url": "https://github.com/alchaincyf/nuwa-skill/blob/main/SKILL.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "nuwa's mental-model filter is a three-way test — cross-domain recurrence, generativity, distinctiveness — which the template reuses to select rhetorical MOVES rather than opinions",
+   "detail": "references/extraction-framework.md: a claim qualifies as a mental model only if it recurs across >=2 different domains, lets you predict the person's stance on a NEW question, and is not something every smart person would think. Pass 1-2 of 3 → demote to decision heuristic; pass 0 → discard. Template Section 7 applies exactly this test to argumentative moves, and adds a mandatory *Limit* per trait, because an ungoverned 'always reframes the question' makes the debate unwinnable.",
+   "source_url": "https://github.com/alchaincyf/nuwa-skill/blob/main/references/extraction-framework.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "nuwa's fidelity scorecard mandates that the answering agent and the grading agent be different agents",
+   "detail": "references/fidelity-scorecard.md scores 5 dimensions to 100: stance consistency 30, style recognisability 20, edge-case honesty 20, source transparency 15, structural completeness 15; grades A>=85 / B 70-84 / C 55-69 / D<55. Anti-cheat rules: the answering agent does not know which dimension is tested, the grader does not answer, and test questions must avoid the skill file's own worked examples so the model cannot recite. The template re-weights this for debate (sourcing integrity to 25 with any invented quote an AUTOMATIC fail; new 20-point concession-behaviour test; new 10-point measurable latency check on median first-sentence word count).",
+   "source_url": "https://github.com/alchaincyf/nuwa-skill/blob/main/references/fidelity-scorecard.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "The scorecard's justification for split answering/grading agents rests on a cited paper I could NOT independently verify",
+   "detail": "fidelity-scorecard.md attributes 'LLM self-evaluation of skill quality is 46.4% accurate, near chance' to a 'SkillLens' paper at arXiv 2605.23899. I did not fetch or confirm that arXiv ID or number. Treat the 46.4% figure as an unverified claim from the repo. The underlying practice (do not let a model grade its own roleplay) is independently sound and is standard practice regardless of whether that specific citation resolves.",
+   "source_url": "https://github.com/alchaincyf/nuwa-skill/blob/main/references/fidelity-scorecard.md",
+   "strength": "weak-inference"
+  },
+  {
+   "claim": "nuwa's production example for a contentious real figure adds structures the generic template lacks, several of which map directly onto debate needs",
+   "detail": "examples/trump-perspective/SKILL.md (492 lines) adds: dual-mode activation (roleplay path A vs analyst path B, defaulting to ANALYST on ambiguous input); an explicit EXIT TRIGGER; a CHECKPOINT-three-questions self-check between steps; a 9-row failure-mode Fallback tree (if WebSearch empty → rewrite query; if hedging leaks → replace with assertive words; if output exceeds 3 paragraphs → cut); and an 8-row anti-pattern blacklist checked before output. It also caps inflammatory content strictly to the public record and forbids extrapolating beyond it. Its FIDELITY.md scored 95/100 grade A, losing points partly because primary sources were exactly 50% rather than >50%.",
+   "source_url": "https://github.com/alchaincyf/nuwa-skill/blob/main/examples/trump-perspective/SKILL.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "nuwa's anti-pattern list independently names fabricated quotes as the #1 failure and demands attribution for every quote",
+   "detail": "SKILL.md anti-pattern blacklist item 1: never fabricate things the person did not say, because large volumes of forged celebrity quotations circulate online; a quote whose original source cannot be found should be dropped rather than used. Item 4: prefer an honest 60-point skill with documented limits over a seemingly perfect 90-point one that invents. Item 8: distilling a living non-public person requires user-supplied material and the subject's consent. This is the strongest external corroboration for making the ledger the structural centre of the template.",
+   "source_url": "https://github.com/alchaincyf/nuwa-skill/blob/main/SKILL.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "titanwings/colleague-skill (同事.skill) now redirects to titanwings/distilly; its contribution is layered priority + a conversational correction loop, not research",
+   "detail": "GitHub API on titanwings/colleague-skill resolves to repo titanwings/distilly. prompts/persona_builder.md generates persona.md in strict priority layers: Layer 0 core personality (highest, never violable) → L1 identity → L2 expression style → L3 decision/judgement → L4 interpersonal → L5 boundaries/red lines → Correction layer, with an explicit rule that Correction outranks all. prompts/correction_handler.md turns freeform user feedback ('that's not like him') into appended records of the form '- [scenario: X] should not <wrong behaviour>, should <right behaviour>', routed to persona.md or work.md, with conflict detection against existing rules.",
+   "source_url": "https://github.com/titanwings/distilly/blob/main/prompts/persona_builder.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "distilly's most reusable rule is that persona traits must be written as executable behaviours, not adjectives — which the template enforces throughout",
+   "detail": "persona_builder.md states Layer 0 quality determines whole-persona quality, and gives explicit wrong/right pairs. Wrong: 'you are assertive', 'you dislike waffle'. Right: 'when someone challenges your proposal you do not explain, you ask back what their basis for that judgement is'. Every field in the delivered template follows this: Section 4 demands checkable style rules ('he answers a question with a question about one turn in four'), and Section 9 demands the concession ladder be written from transcripts rather than chosen generically.",
+   "source_url": "https://github.com/titanwings/distilly/blob/main/prompts/persona_builder.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "The delivered template is verified working against the real loader and the real strip path",
+   "detail": "Ran voxemw.config.parse_persona_file on it: frontmatter parses (name/label/voice_control/voice_seed OK, ref_wav None = design mode accepted per tests/test_config.py::test_load_config_voice_control_without_ref). Comment-strip regex yields 15,810 chars (~3,950 tokens), zero leftover comment markers, all 15 sections (0-14) intact, and the stripped body begins correctly at '# 0 · Disclosure and hard boundaries'. Two bugs were found and fixed during verification: a literal comment terminator inside the how-to block truncated it early (fixed with a \\x3e escape), and the originally stated 1,800-2,800 token budget did not match measurement (corrected to measured figures plus a ranked trim list).",
+   "source_url": "file://./personas/_TEMPLATE-debate-opponent.md",
+   "strength": "strong"
+  }
+ ],
+ "alternatives": [
+  {
+   "name": "Run nuwa's full 6-agent pipeline unmodified and use its skill-template.md output as the persona",
+   "tradeoff": "Gets you the best research substrate available and a proven checkpoint discipline, but its output template is built for a TEXT thinking-advisor, not a voice debate partner. It has no first-sentence length rule, no stage-direction ban, no turn-length ceiling, no concession protocol, and no sourced-position ledger — its roleplay rules only ask the model to 'mark inferences' in prose, which is far weaker than refusing to assert un-IDed positions. Its disclaimer also fires once and is placed mid-file rather than first.",
+   "when_to_prefer": "Use it for the RESEARCH phase — it is better at that than anything you would write from scratch. Then pour the results into this template rather than into its own skill-template.md. That is the intended combination."
+  },
+  {
+   "name": "Copy the trump-perspective example's dual-mode structure (roleplay path A / analyst path B)",
+   "tradeoff": "Its ambiguity default is 'analyst mode' with third-person output, which is exactly wrong for a voice debate partner — every ambiguous turn would drop out of character mid-conversation. Its Fallback tree and pre-output anti-pattern checklist are excellent but assume a text agent that can afford a self-check pass before speaking; at a 2.0s budget you cannot run a checklist between generation and TTS.",
+   "when_to_prefer": "Steal its Fallback-tree and anti-pattern-blacklist idea for OFFLINE evaluation — run those checks in the fidelity harness rather than in the live prompt. Adopt its rule of capping inflammatory content strictly at the public record directly; that one is free."
+  },
+  {
+   "name": "distilly's layered persona.md plus conversational correction loop",
+   "tradeoff": "The strict Layer 0-5 priority ordering with an overriding Correction layer is a genuinely better conflict-resolution model than a flat markdown file, and the correction loop ('that's not like him' → appended scenario rule) is the cheapest fidelity-improvement mechanism in either project. But it is designed for private colleagues reconstructed from chat logs, so it has no sourcing discipline at all — its 'evidence' is the user's subjective impression plus personality tags. Applied to a real public figure with no ledger, it would confabulate confidently.",
+   "when_to_prefer": "Add its Correction layer to this template as a 16th section once you have live users — appended '[scenario: X] should not A, should B' lines, with an explicit note that Corrections may never introduce a new POSITION (only adjust manner), or users will unknowingly edit the figure's views."
+  },
+  {
+   "name": "Skip the persona file; use few-shot transcript excerpts as the system prompt",
+   "tradeoff": "Much higher style fidelity per token and no authoring effort, and it is genuinely tempting for voice because the register comes out right. But it gives you no control surface at all: no disclosure rule, no boundaries, no concession behaviour, no difficulty governor, and — worst — it actively encourages the model to continue in the figure's voice past the end of the record, which is precisely the fabrication failure. It also cannot answer 'where is that from?'.",
+   "when_to_prefer": "Use transcript excerpts as SOURCE material for Section 4 and Section 12, and keep 2-3 short exchanges as few-shot examples appended below the persona. Never as the whole prompt."
+  },
+  {
+   "name": "Two-model split: a small fast model for speech, a larger model for argument selection",
+   "tradeoff": "Would let you run a long, rich ledger through a big model while a small model handles the 8-word opening beat, protecting latency. But it doubles memory residency and adds an inter-model hop inside the 2.0s budget, and on 128 GB you probably do not need it — the persona is prefill-once, not per-turn, so the large prompt is not what threatens the budget.",
+   "when_to_prefer": "Only if measurement shows first-token latency (not prefill) is the binding constraint after the persona is cached. Measure before building this."
+  }
+ ],
+ "latency_estimate": "Per-turn contribution: effectively ZERO, and this is the key architectural point. The persona is injected once per session via session.update (orchestrator.py:69-85), not per turn. With prefix caching (llama.cpp --cache-reuse or the MLX equivalent) the ~4-6k-token prompt is prefilled once at session start and every subsequent turn reuses the KV cache. On an M5 Max a 6k-token prefill is a one-time cost on the order of a few seconds at session open, which is off the conversational critical path entirely. It never touches the 2.0s stop-speaking-to-first-audio budget.\n\nThe one per-turn lever this component owns is the 8-word first-sentence cap, and it runs strongly in our favour. Because configs/assistant.yaml sets stream_batch_sentences: 1, TTS starts the moment sentence #1 is complete, so time-to-first-audio ≈ (tokens in sentence 1 ÷ decode rate) + TTS first-chunk latency. An 8-word opener is roughly 10-12 tokens versus 50-60 for an unconstrained opening sentence — at a plausible local decode rate that is a saving of order several hundred milliseconds to over a second, i.e. a large fraction of the 2.0s target. This is why the rule is in Section 2 with its justification attached rather than buried as a style note.\n\nTwo caveats I did not measure and you should: (1) whether your chosen local serving stack actually reuses the prefix cache across turns when the conversation grows — if it re-prefills, a 6k persona becomes a real per-turn cost and you must trim using the ranked list in the template; (2) the template raises median output length versus the witch persona (a debate turn is 2-4 sentences, ~60 words, versus her 2-3 short ones), which does not affect FIRST audio but does extend total speaking time per turn.",
+ "memory_gb": "Negligible as a component: ~0.02-0.05 GB. The persona is text, and its only runtime footprint is the KV cache for a 4,000-6,000-token prefix — on the order of tens of megabytes for a 7-14B model at typical head dimensions, and it is allocated once per session rather than per turn. The evidence pack (corpus/<persona_id>/, holding transcripts the cite-ids resolve to) lives on disk and is never loaded into the model at runtime by design; budget perhaps 0.1-2 GB of disk for a thorough figure, against ~860 GB free. This component imposes no meaningful constraint on the 128 GB budget and should not influence model-size choice at all.",
+ "install_commands": [
+  "# No new runtime dependencies. The loader already uses pyyaml, which the repo requires.",
+  "# 1. Copy the verified template to a real persona id:",
+  "cp ./personas/_TEMPLATE-debate-opponent.md ./personas/<persona_id>.md",
+  "# 2. Create the evidence pack the cite-ids resolve into:",
+  "mkdir -p ./corpus/<persona_id>/{transcripts,articles,books}",
+  "# 3. Fill the template, then strip the author-facing comment blocks before shipping:",
+  "python3 -c \"import re,sys,pathlib as p; f=p.Path(sys.argv[1]); f.write_text(re.sub(r'<!--.*?--\\x3e\\n?','',f.read_text(),flags=re.S))\" ./personas/<persona_id>.md",
+  "# 4. Verify it parses with the real loader and check the shipped token size:",
+  "cd ./ref-VoxEMW && python3 -c \"import sys; sys.path.insert(0,'.'); from pathlib import Path; from voxemw.config import parse_persona_file; p=parse_persona_file(Path('../personas/<persona_id>.md')); print(p['name'], p['voice_control']); print('approx tokens:', len(p['text'])//4)\"",
+  "# 5. Register it in the config persona list (edit configs/assistant.yaml, personas.list):",
+  "#    <persona_id>: personas/<persona_id>.md",
+  "# Optional, for the research phase only - nuwa's pipeline and helper scripts:",
+  "git clone https://github.com/alchaincyf/nuwa-skill ./vendor/nuwa-skill"
+ ],
+ "risks": [
+  "Impersonation of a real, possibly living, person is the dominant risk and it is legal/ethical, not technical. Section 0 mitigates but does not eliminate it. nuwa's own anti-pattern list (item 8) requires consent for living non-public figures; for a public figure, the disclosure line plus the never-claim-endorsement rule is the floor, not a guarantee. Decide deliberately whether the artefact is ever shared beyond the user's own machine, and note that a voice clone of a real person raises a separate and larger set of issues than the text persona does.",
+  "The ledger is a discipline, not an enforcement mechanism. Nothing in the runtime stops the model asserting an un-IDed position — the structure just makes compliance much easier than violation. Sourcing integrity must therefore be tested adversarially in the fidelity harness (5 questions engineered to tempt fabrication, any invented quote or statistic = automatic fail), not assumed because the section exists.",
+  "Section 9's concession ladder is the section most likely to be filled in from stereotype rather than evidence. If the author has not actually watched the figure lose an exchange, they will invent a ladder, and the persona will either stonewall forever or fold on contact. The 7th 'adversarial' research agent exists precisely to prevent this and is the step most likely to be skipped under time pressure.",
+  "The difficulty governor (Section 11) deliberately trades fidelity for usability. A reviewer measuring pure fidelity will score the persona DOWN for it. Make sure whoever runs the scorecard knows the register cap is intentional, or they will 'fix' the wrong thing.",
+  "Prompt-size drift: Sections 6 and 12 grow without bound as research accumulates. At ~4k tokens unfilled, a 12-entry ledger plus 10 verbatim lines lands near 6k, and instruction adherence degrades as the prompt grows regardless of caching. The ranked trim list in the template exists for this; enforce the 12/10 caps.",
+  "Verbatim quotes in Section 12 are the one place the system reproduces copyrighted material. Keep them short, keep them attributed, and keep the count low — this is another reason for the 10-entry cap beyond token budget.",
+  "A persona this behaviourally specific may fight a small local model. The 8-word opener, the 60-word ceiling, the no-lists rule and the concession ladder are all instruction-following load. If you end up on a 7-8B local model, expect the turn-length ceiling and the stage-direction ban to be the first rules to break — which is exactly why strip_stage_directions() exists in code, and why latency compliance is a measured scorecard dimension rather than an assumed property."
+ ],
+ "open_questions": [
+  "Which figure? Every high-value section (6, 9, 12, and the Section 4 style DNA) is figure-specific and cannot be pre-written. The project directory name suggests a specific target; the template is deliberately neutral because the concession ladder in particular must be built from that person's transcripts. This is the single biggest blocker to going from template to working persona.",
+  "Does the chosen local serving stack actually reuse the KV prefix across turns as the conversation grows? The entire 'persona costs nothing per turn' argument depends on it. Measure with a 6k-token system prompt and a 20-turn conversation before committing to a large ledger — if it re-prefills, trim hard using the ranked list.",
+  "What is the real median first-sentence word count under the 8-word rule with your actual model? This is directly measurable and is the only per-turn latency lever this component owns. Instrument it early and treat >8 median as a persona-quality failure, not a model failure.",
+  "Should the correction loop from distilly be added as a Section 15? It is the cheapest ongoing fidelity mechanism available, but it needs a guard rail the original lacks: corrections may adjust MANNER but must never introduce a new position, or users will silently edit the figure's documented views and the ledger's guarantee quietly stops being true.",
+  "Does the debate opponent need tool access (web search) the way trump-perspective's Agentic Protocol assumes? For a figure whose positions are stable and historical, no — the ledger is complete and a search hop would blow the 2.0s budget. For a currently-active figure taking new public positions, the ledger goes stale at research_cutoff and you need a refresh cadence rather than live search. Decide which case applies before building.",
+  "Is the disclosure line acceptable as written for the intended audience? It costs about 3 seconds of the first turn every session. There is a real tension between the once-per-session rule (good for conversation) and stronger disclosure norms (repeat more often). I chose once-per-session plus an always-honest answer to any direct 'are you real' question; that tradeoff deserves an explicit sign-off rather than being inherited from me."
+ ]
+}

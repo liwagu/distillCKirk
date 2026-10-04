@@ -1,0 +1,157 @@
+{
+  "component": "Text-to-speech: streaming English synthesis with zero-shot voice cloning, on Apple Silicon (M5 Max, 128 GB)",
+  "verdict": "works-native-fast",
+  "recommendation": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit (or -bf16) run through mlx-audio==0.5.3, using ICL cloning (ref_audio + ref_text) with stream=True, streaming_interval=0.32. Do NOT use VoxCPM2 for this slot. Measured on this exact M5 Max: TTFA 0.157-0.256 s, RTF 0.41-0.53, 3.94 GB peak.",
+  "why": "I benchmarked both candidates on this machine (Apple M5 Max, macOS 26.5.2, mlx-audio 0.5.3, English zero-shot clone from a 7.8 s English reference clip with matching transcript). Result: Qwen3-TTS-12Hz-1.7B-Base-8bit gives TTFA 0.157-0.256 s / RTF 0.41-0.53 / 3.94 GB peak, streaming 12-29 chunks per utterance. VoxCPM2-8bit gives TTFA 2.9-11.2 s / RTF 0.73-1.45 / 6.8-7.0 GB peak, in exactly ONE chunk. That is a 20-45x difference in time-to-first-audio, and it is structural, not tuning: the mlx-audio VoxCPM2 port has no chunked streaming at all. Its generate() runs the entire autoregressive loop and then the entire AudioVAE decode before its single yield, and the MLX AudioVAE exposes only decode(z) - there is no streaming_decode()/decode_chunk() state machine like the PyTorch package has. mlx-audio's own docs table marks VoxCPM2 \"Voice Cloning: Yes / Streaming: --\". So on Apple Silicon VoxCPM2's TTFA equals whole-utterance generation time, which for a 5-9 s debate reply is 3-8 s - over the 3.0 s hard ceiling before STT and the LLM have spent anything. Even with a hypothetical perfect chunked port, my linear fit gives marginal RTF 0.83 at the default inference_timesteps=10, so generation would only just keep ahead of playback while also sharing the GPU with STT and a local LLM. The second reason not to use VoxCPM2 here is that it is not even the better English cloning model: on Seed-TTS-eval test-en, Qwen3-TTS-12Hz-1.7B-Base scores WER 1.24 (best-in-class, beating CosyVoice 3 at 1.45, MiniMax-Speech 1.65, F5-TTS 1.83, Seed-TTS 2.25) while VoxCPM2 reports 1.84. Qwen3-TTS also reports the highest speaker similarity across all 10 evaluated languages vs MiniMax-Speech and ElevenLabs. VoxCPM2's real edges - 48 kHz output, 30 languages, tokenizer-free continuation - are irrelevant to a 16 kHz English conversational pipeline. Re the VoxEMW author's Mac choices: he was right to pick Qwen3-TTS, but for a reason he never stated (VoxCPM2 has no MLX streaming), and two of his specific conclusions are stale on this box. (1) His \"bf16 doubles TTFA, generation can't keep up with playback\" note is a 16 GB base-M5 memory-bandwidth artifact he diagnosed himself (\"memory bandwidth 2.6x\"); an M5 Max has several times that bandwidth and my 8-bit run already sits at RTF 0.41-0.53 with headroom, so bf16 is very likely fine here and worth an A/B for clone fidelity. (2) The mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit repo he pins in scripts/mac_setup.sh NO LONGER EXISTS on HF (404); only -bf16, -8bit, -4bit remain, and the HF speech-to-speech handler silently appends \"-6bit\" when given a bare Qwen/... name, so his setup script would fail today unless you pass mlx_quantization explicitly.",
+  "evidence": [
+    {
+      "claim": "MEASURED on this exact machine: Qwen3-TTS-12Hz-1.7B-Base-8bit streams English cloned speech at TTFA 0.157-0.256 s, RTF 0.41-0.53, 3.94 GB peak",
+      "source_url": "https://github.com/Blaizzy/mlx-audio",
+      "detail": "Apple M5 Max, macOS 26.5.2, mlx-audio 0.5.3, ref = 7.8 s English clip + exact transcript, stream=True, streaming_interval=0.32. Rows: {72 chars -> 3.76 s audio, ttfa 0.162 s, total 1.991 s, rtf 0.530, 12 chunks}; {88 chars -> 5.36 s, ttfa 0.256 s, total 2.585 s, rtf 0.482, 17 chunks}; {173 chars -> 9.20 s, ttfa 0.157 s, total 3.758 s, rtf 0.408, 29 chunks}. Load 2.1 s, warmup 5.4 s. Output verified real audio (2.96 s clip, peak 0.723, RMS 0.154 - not the historical silent-clone failure mode). Script: .cache/research",
+      "strength": "strong"
+    },
+    {
+      "claim": "MEASURED on this exact machine: VoxCPM2-8bit via mlx-audio emits ONE chunk per utterance, so TTFA = full generation = 2.9-11.2 s",
+      "source_url": "https://huggingface.co/mlx-community/VoxCPM2-8bit",
+      "detail": "Same machine/harness/reference. Cold run: {72 chars -> 3.2 s audio, ttfa 4.647 s, rtf 1.452, 1 chunk}; {88 chars -> 5.6 s, ttfa 7.333 s, rtf 1.311, 1 chunk}; {173 chars -> 9.28 s, ttfa 11.209 s, rtf 1.208, 1 chunk}. Peak 6.84 GB, load 2.8 s, warmup 46.7 s. Fully warm re-run (bench3.py) at inference_timesteps=10 with ref clone: rtf 1.048 / 0.889 / 0.895, linear fit marginal RTF 0.829 + 0.477 s fixed overhead; ts=7 -> marginal 0.767; ts=5 -> marginal 0.646. Peak 7.02 GB.",
+      "strength": "strong"
+    },
+    {
+      "claim": "mlx-audio's VoxCPM2 port has no streaming by design - single yield after the full AR loop and full VAE decode",
+      "source_url": "https://github.com/Blaizzy/mlx-audio/blob/main/mlx_audio/tts/models/voxcpm2/voxcpm2.py",
+      "detail": "Read the source: generate() has no `stream` parameter; the `for i in range(max_tokens + warmup_patches)` loop appends every patch to pred_feat_seq, then after the loop `audio = self.audio_vae.decode(all_feats_flat)` runs once, then a single `yield GenerationResult(...)` at line ~700. `streaming_prefix_len` only sizes continuation context, it does not chunk output. mlx_audio/tts/models/voxcpm2/audio_vae.py exposes only encode()/decode() - no streaming_decode/decode_chunk. Confirmed independently by DeepWiki reading the repo, and by the official docs table docs/models/tts/index.md which lists 'VoxCPM2 | 2B | 30 languages | Voice Cloning: Yes | Streaming: --'.",
+      "strength": "strong"
+    },
+    {
+      "claim": "The upstream PyTorch voxcpm package DOES stream at 160 ms granularity - this is the capability that is missing on Apple Silicon",
+      "source_url": "https://github.com/OpenBMB/VoxCPM/blob/main/src/voxcpm/model/voxcpm2.py",
+      "detail": "generate_streaming() -> _generate(streaming=True) uses `with self.audio_vae.streaming_decode() as vae_dec: decode_audio = vae_dec.decode_chunk(...)` and _inference yields every single patch. AudioVAE V2 encoder_rates [2,5,8,8] = 640x at 16 kHz = 25 Hz latents, patch_size 4 -> 6.25 Hz LM token rate = 160 ms of audio per AR step (matches the official spec table 'LM Token Rate 6.25Hz'). That is the path VoxEMW used on the 4090 to get TTFA 0.16-0.24 s.",
+      "strength": "strong"
+    },
+    {
+      "claim": "On Seed-TTS-eval test-en, Qwen3-TTS-12Hz-1.7B-Base (WER 1.24) beats VoxCPM2 (WER 1.84) and every other listed open system",
+      "source_url": "https://arxiv.org/html/2601.15621v1",
+      "detail": "Qwen3-TTS technical report Table 5, zero-shot cloning, test-zh | test-en: Qwen3-TTS-12Hz-1.7B-Base 0.77 | 1.24; 12Hz-0.6B-Base 0.92 | 1.32; CosyVoice 3 0.71 | 1.45; MiniMax-Speech 0.83 | 1.65; F5-TTS 1.56 | 1.83; Spark TTS 1.20 | 1.98; Seed-TTS 1.12 | 2.25. VoxCPM2's own technical report (arxiv 2606.06928) reports test-EN 1.84 WER / 75.3% SIM vs test-ZH 0.97 CER / 79.5% SIM - i.e. VoxCPM2 is measurably Chinese-first, Qwen3-TTS is English-SOTA. Qwen3-TTS also claims highest speaker similarity in all 10 languages vs MiniMax and ElevenLabs.",
+      "strength": "strong"
+    },
+    {
+      "claim": "Independent third party benchmarked both on a MacBook: VoxCPM2 is ~2.4x slower than Qwen3-TTS 1.7B and ~5.5x slower than Chatterbox",
+      "source_url": "https://on-device-ai.com/posts/2026-05-26-tts-comparison/",
+      "detail": "Same test sentence on the author's MacBook: Chatterbox 8-bit 1.9 s / 2.04 GB; Qwen3-TTS 0.6B 8-bit 3.4 s / 2.11 GB; Qwen3-TTS 1.7B 8-bit 4.4 s / 3.15 GB; VoxCPM2 8-bit 10.5 s / 3.35 GB; VoxCPM2 4-bit 10.2 s / 2.49 GB. Prose verdict: Qwen3-TTS 'speed is in the upper quartile'; VoxCPM2 'quality is good, but unfortunately its speed is not as strong'. Direction matches my own measurement exactly.",
+      "strength": "strong"
+    },
+    {
+      "claim": "VoxCPM2 on Apple Silicon via MPS/PyTorch is worse than the MLX path: float32 is force-enabled and the maintainer's own recommendation was to run on CPU",
+      "source_url": "https://github.com/OpenBMB/VoxCPM/blob/main/src/voxcpm/model/utils.py",
+      "detail": "pick_runtime_dtype(): 'On Apple Silicon (MPS), bfloat16/float16 produce enough numerical drift in the diffusion AR loop that the output is glitched and the model's badcase detector triggers infinite retries. float32 is the only stable option today.' (PR #263). Issue #232 'NotImplementedError: Output channels > 65536 not supported at the MPS device' in the AudioVAE decoder - maintainer liuxin99: 'the current recommended workaround is to explicitly run on CPU instead of letting the runtime fall back to MPS... MPS being available does not necessarily mean the full VoxCPM pipeline can run on it safely.' Issue #337 'voxCPM2.0 does not yet support Mac M-chip MPS acceleration' is still OPEN (2026-06-08). Issue #293 (open) documents streaming degrading from 0.3 s/chunk to 1-2 s/chunk after 400+ chunks from an O(max_length) attention mask. A 2B model at forced fp32 is ~8 GB of weights read per step - strictly slower than the 8-bit MLX path I measured at RTF ~0.9-1.05.",
+      "strength": "strong"
+    },
+    {
+      "claim": "mlx-audio models that support BOTH zero-shot cloning AND chunked streaming are Qwen3-TTS, Breeze TTS 2, and CSM/MisoTTS (plus undocumented chatterbox_turbo)",
+      "source_url": "https://github.com/Blaizzy/mlx-audio/blob/main/docs/models/tts/index.md",
+      "detail": "Official comparison table columns Voice Cloning / Streaming: Qwen3-TTS Yes/Yes; Breeze TTS 2 (1B, EN+ZH) Yes/Yes; CSM/MisoTTS (1B/8B, EN) Yes/Yes; Higgs Audio v3 (4B) Yes/--; Chatterbox (0.5B) Yes/--; Kokoro (82M) --/-- (no cloning at all - answers your Kokoro question: it has 54 fixed voice presets, it cannot clone a reference); VoxCPM2 Yes/--. chatterbox_turbo is absent from the docs table but IS in MODEL_REMAPPING and its chatterbox_turbo.py has a real stream_generate() with t3.inference_turbo_stream + s3gen.inference_stream, chunk_size = streaming_interval*25 tokens.",
+      "strength": "strong"
+    },
+    {
+      "claim": "The 6-bit Qwen3-TTS Base repo that VoxEMW pins has been removed from Hugging Face - his mac_setup.sh will fail today",
+      "source_url": "https://huggingface.co/api/models/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+      "detail": "GET /api/models/mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit returns 404 (checked today). Surviving variants: -bf16 (13,575 downloads), -8bit (4,084), -4bit (784). scripts/mac_setup.sh line 54 does `hf download mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit`, and speech_to_speech/TTS/qwen3_tts_handler.py _resolve_mlx_model_name() appends '-6bit' by default for bare Qwen/... names, so you must set qwen3_tts_mlx_quantization to 8bit or bf16.",
+      "strength": "strong"
+    },
+    {
+      "claim": "mlx-audio fixed a Qwen3-TTS ICL cloning bug that made cloned speech progressively speed up - VoxEMW's pinned stack predates the fix",
+      "source_url": "https://github.com/Blaizzy/mlx-audio/issues/910",
+      "detail": "Issue #910 (2026-08-26, mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit): ICL cloning accelerates ~60% over a long generation because _generate_icl floors repetition_penalty to 1.5 and _sample_token applies it over ALL previously generated codec tokens, suppressing slow-pace patterns. Fixed by PR #914 'window ICL repetition penalty to stop pace acceleration', shipped in mlx-audio v0.5.1 (2026-08-31). The reporter reproduced it on the commit oMLX pins, 5175326 (2026-04-07). Pin mlx-audio >= 0.5.1; I benchmarked on 0.5.3.",
+      "strength": "strong"
+    },
+    {
+      "claim": "There IS a genuine streaming VoxCPM2 path on Apple Silicon if you insist on that model, but both options are unproven side-projects",
+      "source_url": "https://github.com/0seba/VoxCPMANE/blob/voxcpmane2/README.md",
+      "detail": "(a) VoxCPMANE2: pure numpy/CoreML runtime on the Apple Neural Engine, `pip install voxcpmane2`, with real streaming VAE (--vae-early-decode-steps 16 / --vae-batch-decode-steps 4). Its README table for 'Text + reference wav': preload TTFB 0.745 s / RTF 0.593; single-length-32 TTFB 0.408 s / RTF 0.726. Chip not stated; last release 0.1.3b1 on 2026-06-10, stable 0.1.2, i.e. 3 months stale. (b) audio.cpp v0.7.3 (2026-09-07) has a prebuilt macOS-arm64-Metal binary I downloaded and ran here (`backends: cpu,metal`), a voxcpm2 model spec with modes ['offline','streaming'] and tasks ['tts','clone','design'], a voxcpm2-q8_0.gguf (2.96 GB) in audio-cpp/audio.cpp-gguf, and release notes 'Add VoxCPM2 stateless chunk strategy' (PR #478) plus 'Huge performance boost for selected models on Metal (>5x)'. I did not finish downloading the GGUF, so its M5 Max RTF is unmeasured.",
+      "strength": "moderate"
+    },
+    {
+      "claim": "Qwen3-TTS is designed for exactly this: 97 ms first-packet latency, 320 ms streamed packets, streaming text in / streaming audio out",
+      "source_url": "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+      "detail": "Model card: 'a single model supports both streaming and non-streaming generation. It can output the first audio packet immediately after a single character is input, with end-to-end synthesis latency as low as 97ms.' Tech report: 97 ms first-packet (0.6B) / 101 ms (1.7B) at single concurrency. Apache-2.0. Base variant = the cloning variant (CustomVoice/VoiceDesign cannot clone - mlx-audio issue #557 confirms CustomVoice silently ignores ref_audio). mlx-audio's own qwen3_tts README benchmark (6-bit, batch 1): TPS 20.8, 1.67x realtime, avg TTFB 84.8 ms, 3.88 GB.",
+      "strength": "strong"
+    },
+    {
+      "claim": "Reference-clip guidance that materially changes clone quality: 10-30 s, exact transcript covering the WHOLE clip, ICL mode not x-vector mode",
+      "source_url": "https://github.com/Blaizzy/mlx-audio/issues/910",
+      "detail": "mlx-audio issue #921 (referenced from #910): 'ICL voice cloning randomly degenerates (no EOS, 24s garbage) - root cause: ref_text not covering full ref_audio; confirmed not a port bug via official PyTorch A/B'. Qwen docs: 3 s minimum, 5-10 s for good quality, 'verify reference text exactly matches the audio'; a third-party Qwen3-TTS implementation's docs recommend 30 s as the sweet spot (5-10 s 'minimum for recognizable', 15-20 s 'better', 30 s 'recommended', 45 s+ diminishing returns) and note the 1.7B-Base 'produces significantly better voice clones than the 0.6B-Base' (2048-dim vs 1024-dim speaker embedding). VoxEMW independently found you should trim the first ~120 ms of the reference (commit 478a129: lip-smack/transient in ref.wav gets cloned into the start of every reply).",
+      "strength": "moderate"
+    }
+  ],
+  "alternatives": [
+    {
+      "name": "Chatterbox Turbo (mlx-community/chatterbox-turbo-fp16 via mlx-audio, or ResembleAI/chatterbox-turbo)",
+      "tradeoff": "English-first by design (350M, MIT, distilled one-step decoder) and the fastest thing in this class on a Mac - the on-device-ai MacBook comparison has it at 1.9 s vs Qwen3-TTS-1.7B's 4.4 s on the same sentence, and Resemble reports ~75 ms latency / 6x realtime on GPU and a 65.3% blind preference over ElevenLabs Turbo v2.5. mlx-audio's chatterbox_turbo.py has a real stream_generate(). Downsides: it is undocumented in mlx-audio's model table; resemble-ai issue #424 (open) reports it hallucinates badly above ~350 characters, so you must hard-split at sentence boundaries; an independent survey flags high CER and 'unintelligible loops on long text'; issue #433 reports it vocalizes a double-quote character as an audible sigh; and all output carries PerTh watermarks. English only (Chatterbox Multilingual v3 covers 23 languages but is slower and does not stream in mlx-audio).",
+      "when_to_prefer": "If, after an A/B listen, Qwen3-TTS's clone of your specific reference voice sounds flat or generically-TTS. Chatterbox Turbo is the English-character/expressiveness play. Its 350 char limit is a non-issue for a debate partner because you are already feeding TTS one clause/sentence at a time. Pre-download it: the fp16 MLX weights are 2.99 GB (mlx-community/chatterbox-turbo-fp16)."
+    },
+    {
+      "name": "Qwen3-TTS-12Hz-0.6B-Base (mlx-community/Qwen3-TTS-12Hz-0.6B-Base-bf16)",
+      "tradeoff": "Roughly 3x less compute than the 1.7B and on the Qwen multilingual test it actually scores BETTER on English than the 1.7B (content consistency 0.836 vs 0.934; speaker similarity 0.829 vs 0.775) - though on Seed-TTS test-en the 1.7B wins (1.24 vs 1.32). Its speaker embedding is 1024-dim vs the 1.7B's 2048-dim, and practitioners report the 1.7B gives noticeably better clone fidelity. First-packet latency 97 ms vs 101 ms.",
+      "when_to_prefer": "If GPU contention with a local LLM turns out to be the binding constraint. Given the conflicting English numbers, this is worth 20 minutes of A/B listening against the 1.7B on your actual reference voice before you assume bigger is better."
+    },
+    {
+      "name": "VoxCPM2 via audio.cpp (Metal GGUF) or VoxCPMANE2 (CoreML/ANE)",
+      "tradeoff": "The only two ways to get chunk-streaming VoxCPM2 on a Mac. audio.cpp v0.7.3 ships a prebuilt macos-arm64-metal binary (verified working on this box), a voxcpm2 spec with streaming mode, and voxcpm2-q8_0.gguf (2.96 GB); VoxCPMANE2 runs on the Neural Engine (leaving the GPU entirely free for the LLM - architecturally attractive) with published TTFB 0.41-0.75 s and RTF 0.59-0.73 for cloning. Both are one-person side projects; VoxCPMANE2's last release is a June 2026 prerelease; neither is measured on an M5 Max; and you would be adding a C++ server or a CoreML runtime as a dependency to get a model that is behind Qwen3-TTS on English cloning anyway.",
+      "when_to_prefer": "Only if you specifically need VoxCPM2's 48 kHz output or its voice-design/accent-instruction mode AND a listening test shows Qwen3-TTS's VoiceDesign variant is not good enough. Note Qwen3-TTS-12Hz-1.7B-VoiceDesign does free-form voice design with explicit accent control too, and an independent review rates the two 'much the same' at design."
+    },
+    {
+      "name": "CSM-1B / MisoTTS (mlx-community/csm-1b) via mlx-audio",
+      "tradeoff": "English-only, Sesame-style conversational model with cloning + streaming (streaming_interval default 0.5 s) and native multi-turn context conditioning - the only option here that models turn-taking prosody explicitly. But it is a 1B model at ~20 GB peak in one third-party Mac benchmark, its cloning is context/prompt-based rather than a dedicated speaker encoder, and there is no Seed-TTS-eval number to compare against Qwen3-TTS's 1.24.",
+      "when_to_prefer": "If the debate partner starts sounding like it is reading rather than conversing, and you want turn-aware prosody. Try it only after Qwen3-TTS is working end to end."
+    },
+    {
+      "name": "Sopro V2 Turbo (pip install sopro, samuel-vitorino/sopro-v2-turbo)",
+      "tradeoff": "120M params, Apache-2.0, English-first, streaming with ~300 ms TTFA and 0.21 RTF streaming measured on an M3 CPU - it does not need the GPU at all, which removes all contention with a local LLM. Self-reported 1.65 WER on Seed-TTS English. Actively maintained (v2.2.0, 2026-09-01). Downsides: self-reported benchmarks only, no third-party verification; the streaming path is explicitly not bit-exact with the offline path ('for best quality, prefer the offline path'); a deliberately minimal text frontend (numbers and abbreviations must be spelled out); no MLX/mlx-audio integration (it is in audio.cpp as sopro_tts).",
+      "when_to_prefer": "The dark horse. If you end up GPU-bound because the local LLM eats the Metal device, moving TTS entirely to CPU for ~0.2 RTF is a very clean architectural escape hatch. Worth a 30-minute spike."
+    },
+    {
+      "name": "Kokoro-82M, F5-TTS / F5-TTS-MLX, XTTS-v2 / Coqui, IndexTTS2, Fish-Speech",
+      "tradeoff": "Ruled out for this slot. Kokoro cannot zero-shot clone at all (54 fixed voice packs; mlx-audio's table marks both Voice Cloning and Streaming as '--') - it is only useful as an instant fallback voice. F5-TTS is a non-autoregressive flow-matching model that generates the whole utterance at once, so it has no meaningful TTFA story, and community Mac reports have it slower than real time (63 s for a 50 s clip on an M-series); mlx-audio does not ship it and its chunked-streaming API does not exist there. XTTS-v2/Coqui is a 2023 model with a defunct upstream, no MLX path, poor MPS support, and is comprehensively beaten on Seed-TTS-eval. IndexTTS2 and Fish-Speech S2 are strong models but IndexTTS in mlx-audio has no stream parameter, and Fish Audio S2 Pro requires a separate paid written licence for any commercial self-hosting.",
+      "when_to_prefer": "Kokoro only as a zero-latency non-cloned fallback voice (e.g. for system prompts or when the reference profile fails to load). The others: not for this use case."
+    }
+  ],
+  "latency_estimate": "MEASURED on this Apple M5 Max, not estimated. Qwen3-TTS-12Hz-1.7B-Base-8bit, English ICL clone from a 7.8 s reference, streaming_interval=0.32 s, mlx-audio 0.5.3, idle machine: TTFA 0.157 s / 0.256 s / 0.157 s over three debate-length sentences (72/88/173 chars), i.e. call it 0.16-0.26 s cold-in-turn. RTF 0.41-0.53, so a 9.2 s reply finishes generating in 3.76 s - generation stays roughly 2.4x ahead of playback and will not underrun. Load 2.1 s, one-time warmup 5.4 s (do this at startup, not in the first turn). Budget for the full pipeline: STT ~0.2-0.4 s + local LLM first sentence ~0.3-0.6 s + TTS 0.16-0.26 s + WebRTC/playout ~0.05-0.1 s = roughly 0.7-1.4 s mouth-close to first audio, comfortably inside your 2.0 s target with headroom for GPU contention. For calibration, VoxEMW measured ~2-2.5 s on a 16 GB base M5 with the same TTS but a network round-trip to DeepSeek for the LLM; removing that hop is where most of your gain comes from. Caveat: my numbers are on an otherwise-idle GPU. Running STT and a local LLM on the same Metal device concurrently will raise RTF; mlx-audio ships an MLXLockContext for exactly this reason and the MLX stream state is thread-local, so drive TTS from one dedicated worker thread. Re-measure TTFA under real load before you consider the budget met. For contrast on the same box: VoxCPM2-8bit TTFA was 2.9-11.2 s (single non-streamed chunk) - 20-45x worse and over the 3.0 s hard ceiling on its own.",
+  "memory_gb": "3.94 GB peak measured (mx.get_peak_memory) for Qwen3-TTS-12Hz-1.7B-Base-8bit including the 682 MB speech tokenizer; on-disk 3.1 GB. The bf16 variant is ~4.5 GB on disk, so budget ~6 GB peak; the 4-bit is ~2.4 GB peak. On 128 GB unified memory none of these are remotely constraining - pick bf16 for quality unless an A/B shows no audible difference. For reference, VoxCPM2-8bit peaked at 6.84-7.02 GB (3.2 GB on disk) for materially worse English cloning and 20x worse TTFA, and VoxCPM2 on the PyTorch MPS path would be forced to float32 (~8 GB of weights alone).",
+  "install_commands": [
+    "uv venv --python 3.12 .venv-tts",
+    "uv pip install --python .venv-tts/bin/python 'mlx-audio==0.5.3'",
+    "# REQUIRED, and not pulled in automatically - without these the Qwen3 tokenizer fails to build and cloning dies with 'ValueError: Tokenizer not loaded. Call post_load_hook first.'",
+    "uv pip install --python .venv-tts/bin/python tiktoken sentencepiece protobuf",
+    "# optional, only if you hit a misaki/espeak ImportError on some mlx-audio code paths",
+    "uv pip install --python .venv-tts/bin/python misaki spacy phonemizer-fork espeakng-loader",
+    "hf download mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit   # 3.1 GB; use -bf16 (4.5 GB) for best quality on 128 GB",
+    "# smoke test (replace ref.wav / transcript with the real speaker's clip):",
+    "python -m mlx_audio.tts.generate --model mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit --text 'That is a fair point, but I think you are overlooking something.' --ref_audio ref.wav --ref_text '<exact transcript of the WHOLE ref.wav>' --stream --save",
+    "# --- only if you also want to A/B Chatterbox Turbo ---",
+    "hf download mlx-community/chatterbox-turbo-fp16   # 3.0 GB, English-first, MIT",
+    "# --- only if you insist on VoxCPM2 with real streaming on Mac (unproven on M5 Max) ---",
+    "curl -L -o audiocpp.tar.gz https://github.com/0xShug0/audio.cpp/releases/download/v0.7.3/audio-v0.7.3-bin-macos-arm64-metal.tar.gz && tar xzf audiocpp.tar.gz && chmod +x audiocpp_cli",
+    "hf download audio-cpp/audio.cpp-gguf --include 'VoxCPM2-GGUF/voxcpm2-q8_0.gguf'   # 2.96 GB",
+    "./audiocpp_cli --task clon --family voxcpm2 --model <path>/voxcpm2-q8_0.gguf --backend metal --mode streaming --voice-ref ref.wav --reference-text '<transcript>' --text 'hello' --metrics"
+  ],
+  "risks": [
+    "VoxEMW's scripts/mac_setup.sh is broken as written: mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit returns 404 on HF today. The HF speech-to-speech Qwen3 handler also silently appends '-6bit' to any bare 'Qwen/...' name on Darwin, so if you reuse his config you must set qwen3_tts_mlx_quantization: 8bit (or bf16) explicitly or startup will fail on model download.",
+    "Missing tokenizer dependency is a silent trap: without tiktoken/sentencepiece installed, mlx-audio loads the Qwen3-TTS model successfully, prints only a 'Warning: Could not load tokenizer', and then dies at the first cloning call with 'ValueError: Tokenizer not loaded. Call post_load_hook first.' I hit this exactly. Also make sure tokenizer_config.json actually lands in the model dir - a partial download of just the weights loads fine and fails the same way.",
+    "ICL cloning is fragile about the reference pair. ref_text must be an exact transcript covering the WHOLE of ref_audio - mlx-audio issue #921 traced random degeneration (no EOS, 24 s of garbage) to a ref_text that only covered part of the clip, and confirmed against the official PyTorch implementation that it is not a port bug. Cloning also only works on Base models; CustomVoice silently ignores ref_audio (issue #557).",
+    "Upstream QwenLM issue #341 (open): ICL cloning can echo the tail of the reference transcript for ~1-2 s at the start of generated speech. The reporter showed it survives repetition_penalty 1.05-1.4 and greedy decoding. If this shows up on your reference voice it would poison every turn's opening. Mitigation options: shorter ref_text, x_vector_only_mode, or trimming the leading audio. Listen for it explicitly during the A/B.",
+    "Pin mlx-audio >= 0.5.1. Earlier versions (including the 2026-04-07 commit oMLX pins) have the ICL repetition-penalty bug that makes cloned speech accelerate ~60% over a long generation (issue #910, fixed by PR #914). mlx-audio ships roughly weekly (0.5.3 landed 2026-09-07) and has a history of Qwen3-TTS cloning regressions (#393/#394, #405/#407, #409 all produced silent or crashing clones), so pin an exact version and re-test on every bump.",
+    "GPU contention is the main unknown in the latency budget. My 0.16-0.26 s TTFA was measured on an idle GPU. STT and a local LLM on the same Metal device will raise RTF. MLX stream state is thread-local - drive TTS from one dedicated worker thread and use mlx-audio's MLXLockContext, or you will get corruption rather than just slowdown.",
+    "The reference clip's head transient gets cloned into every reply. VoxEMW hit this and fixed it by trimming the first 120 ms of ref.wav (commit 478a129: the original ref produced an isolated 10 ms spike at the start of each generation). Trim and loudness-normalize the reference before you register it.",
+    "Re-encoding the reference on every call costs real time. My VoxCPM2 fit showed ~0.5-0.8 s of fixed per-call overhead from ref encoding, and a third-party Qwen3-TTS implementation measured a 2x speedup from caching a precomputed voice profile instead of re-running mel + speaker + speech encoding each turn. Cache the encoded reference once at startup; the HF handler already keeps an _mlx_ref_audio_cache.",
+    "Do not treat the third-party 'VoxCPM2 on M5 Max: RTF 0.30-0.55' claim (leoli-dev/tts-server-voxcpm README) as applicable. I measured the same model, same quant, same chip and got RTF 0.83-1.45 depending on warm-up and timesteps; their figure was on Chinese text and I could not reproduce it. Even if it were right, it would not fix the absence of streaming.",
+    "Chatterbox Turbo, if you adopt it, hallucinates above ~350 characters (resemble-ai issue #424, open) and watermarks all output. Hard-split text at sentence boundaries."
+  ],
+  "open_questions": [
+    "Subjective English clone fidelity on the ACTUAL reference speaker. Every number I have is a corpus metric or a latency measurement; none of it tells you whether this specific person's voice comes out recognizable. Run a blind A/B with a 20-30 s clean clip of them across: Qwen3-TTS-12Hz-1.7B-Base-bf16, -8bit, Qwen3-TTS-12Hz-0.6B-Base-bf16 (which scores BETTER than the 1.7B on the Qwen multilingual English test: 0.836 vs 0.934 WER, 0.829 vs 0.775 SIM, while losing on Seed-TTS test-en), and Chatterbox Turbo. This is the one thing I could not settle and it is the thing that decides the final pick.",
+    "bf16 vs 8-bit on this machine. I measured 8-bit at RTF 0.41-0.53 / 3.94 GB. bf16 should be fine on M5 Max bandwidth (VoxEMW's bf16 rejection was a 16 GB-machine artifact he attributed to memory bandwidth himself), and a third-party validation measured Qwen3-TTS-1.7B-Base-bf16 at RTF 0.5-0.6 on Apple Silicon - but I did not measure bf16 here. 30-minute check, and it is the free quality upgrade your 128 GB buys you.",
+    "TTFA under real pipeline load. Everything I measured had the GPU to itself. Once STT and a local LLM are resident and generating on the same Metal device, re-measure TTFA and RTF before declaring the 2.0 s budget met. If TTS becomes the contention victim, Sopro V2 Turbo on CPU (0.21 RTF streaming on an M3 CPU) is the cleanest escape hatch.",
+    "Whether the Qwen3-TTS reference-tail echo (QwenLM issue #341) reproduces on English with this reference voice. It was reported in Spanish and survives sampling-parameter changes. If it appears, it is a per-turn quality bug that would need a downstream trim.",
+    "audio.cpp's VoxCPM2 Metal streaming RTF on an M5 Max. I verified the prebuilt macos-arm64-metal binary runs here (backends: cpu,metal) and that the voxcpm2 spec declares streaming mode, but I did not finish the 2.96 GB GGUF download. This is the only measurement that could change the VoxCPM2 verdict, and it is a ~40 minute experiment if the user cares about VoxCPM2 specifically.",
+    "Whether the pipeline should feed TTS per-sentence or per-clause. VoxEMW used stream_batch_sentences: 1 (per sentence). At TTFA 0.16 s per call, per-clause would cut perceived latency further but costs cross-clause prosody continuity. Worth a listening comparison once the loop is closed."
+  ]
+}

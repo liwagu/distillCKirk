@@ -1,0 +1,171 @@
+{
+ "component": "Real-time audio-driven photorealistic talking head on Apple Silicon (M5 Max, 128 GB) — evaluation of Soul-AILab/SoulX-FlashHead-1_3B and all alternatives",
+ "verdict": "works-native-fast",
+ "recommendation": "Do NOT use SoulX-FlashHead. Use MuseTalk 1.5 via the Apple-MLX port: HF weights `mlx-community/MuseTalk-1.5-fp16` (or `-q8`), code `github.com/xocialize/musetalk-mlx` (package `musetalk-mlx` 0.1.0, `musetalk_mlx.pipeline_mlx.MuseTalkPipeline`), mlx>=0.30.0, Python 3.12. Its author benchmarked it on \"MacBook Pro M5 Max 128 GB\" — the exact target machine — at 34 fps @ batch 8 / 30.6 fps @ batch 4, 7 GB peak, fp16. Wrap it in the SoulX server architecture already in the repo (paced feed, three-stage accumulate/generate/drip pipeline, 25 fps deadline scheduler, flush-epoch interrupt) at ./ref-VoxEMW/voxemw/avatar/soulx_server.py — that engineering transfers verbatim. Layer it on a Tier-D idle/talking video loop so the GPU is idle whenever the assistant is not speaking. Keep the Tier-C VRM renderer (git tag v1.9.0, web/avatar-vrm.js, 430 lines) as the zero-cost fallback.",
+ "why": "SoulX-FlashHead fails on Apple Silicon for two independent reasons, and the second one is fatal even on a 4090. (1) SPEED. Its config is knowable exactly: dim 1536, ffn 8960, 30 layers, 12 heads, patch [1,1,1], vae_stride [8,32,32], 512x512, frame_num 33, sample_steps 4 (Model_Lite/config.json + flash_head/configs/infer_params.yaml + inference.py). That gives a 5x16x16 = 1280-token latent, ~3.5 TFLOPs per denoising step, ~14 TFLOPs for 4 steps, plus ~2 TFLOPs of LTX-VAE decode = ~16 TFLOPs per 0.96 s chunk, i.e. ~17 TFLOPS sustained to hold 25 fps. The 4090 does that chunk in 0.266 s (~60 TFLOPS effective, 36% of its 165 TFLOPS peak) — but only with torch.compile on both DiT and VAE (COMPILE_MODEL/COMPILE_VAE = True in flash_head_pipeline.py) plus flash-attn. The M5 Max delivers a measured MLX GEMM wall-clock peak of ~19.9 TFLOPS fp16 against the 4090's measured ~170 TFLOPS — a ratio of 0.12, and PyTorch/MPS lands below MLX, not above it. Three methods converge on M5 Max ≈ 1/5 to 1/8 of a 4090 for this class of work, so SoulX Lite lands at 1.3–2.1 s per 0.96 s chunk = 8–18 fps, central estimate ~12 fps, i.e. 0.4–0.6x realtime. It cannot hit 25 fps. Model_Pro (10.8 fps on a 4090) would be ~1.5 fps and is not worth discussing. (2) LATENCY — this is the real killer and it is hardware-independent. SoulX consumes a whole 0.96 s audio slice before it can emit the corresponding 24 frames, and the model needs a further ~0.5 s to open the mouth from a closed-lip continuation. The VoxEMW author fought this for a full day, tried a timestamp/cursor resync architecture, fixed ~10 bugs, and rolled back to `avatar.audio_lead_ms = 1300` — his own conclusion in docs/plan-4090.md is \"1.3s lead 就是物理下限\" (the 1.3 s lead is the physical floor). His shipped 4090 system opens its mouth at ~3.2 s (1.9 s thinking + 1.3 s lead). Our budget is 2.0 s target / 3.0 s hard ceiling for user-stops-speaking to first audio. Adopting SoulX spends 65% of the entire budget on lip-sync alignment before VAD, STT, LLM or TTS have done anything. Even a free, infinitely fast SoulX would blow the budget. MuseTalk is structurally different: single UNet forward per frame at t=0 (no denoising loop), whisper-tiny features with a ±2-frame window, so the lead is one batch — ~0.3–0.5 s at batch 4–8. That is the difference between fitting in the budget and not. THE 16 GB CAVEAT DOES NOT RESCUE SOULX. The author's \"local LLM not good enough\" call was a memory/quality call that 128 GB genuinely overturns. This one is not: SoulX at 6 GB was never memory-bound on the Mac, it is compute-bound and latency-bound, and 128 GB buys nothing. Re-evaluated on the merits, it still fails. PORTABILITY, for the record: SoulX is closer to portable than the requirements.txt suggests. flash_head_model.py:36-65 has a `flash_attention()` wrapper that already falls through to `F.scaled_dot_product_attention` when neither flash_attn nor sageattention imports, and attention is only ~5% of FLOPs at seq-len 1280, so flash-attn's absence costs almost nothing. The actual blockers are mechanical: ~8 `torch.cuda.synchronize()` calls, `import torch.cuda.amp as amp` + `amp.autocast` at flash_head_model.py:544, `device=\"cuda\"` defaults, and a requirements.txt carrying nvidia-nccl-cu12 / xfuser / xformers / flash_attn / decord / mediapipe==0.10.9 that will not install on arm64 macOS. Conv3d on MPS is no longer a blocker — PyTorch 2.14 moved it to hand-written Metal kernels. So the port is 30–80 lines; it is simply not worth doing, because the result runs at ~12 fps and costs 1.3 s. GPU CONTENTION seals it: on the 4090 SoulX used ~28% of the GPU alongside STT+TTS+VLM. On this Mac SoulX would need 100%+ of a single shared GPU that also has to run Qwen3-ASR and the MLX TTS, and TTS time-to-first-audio is exactly what the latency budget is made of. MuseTalk at 25/34 = 74% duty is already tight, but it only runs while the assistant speaks — during user speech and LLM thinking the avatar sits on a pre-rendered loop at 0% GPU, which is precisely when STT needs the GPU. That complementarity is the whole reason the Tier-B + Tier-D combination works on one chip.",
+ "evidence": [
+  {
+   "claim": "The musetalk-mlx author benchmarked the port on a MacBook Pro M5 Max 128 GB — the exact target machine — and passed a realtime gate at 34 fps (bs=8) / 30.6 fps (bs=4), 7 GB peak, fp16",
+   "detail": "_research/PREFLIGHT.md line 8: 'Hardware: MacBook Pro M5 Max 128 GB'. Line 83 (phase 5, Realtime): 'Gate E PASS: bs=8 -> 34 fps (>25fps realtime), bs=4 -> 30.6 fps; peak 7 GB; fp16 recon mean|D|=0.43 vs torch'. The benchmark harness is scripts/bench_realtime.py, which sweeps bs in (1,4,8,16,32) with mx.synchronize() boundaries and reports frames/s and mx.get_peak_memory(). This is a same-silicon, same-RAM measurement, not an extrapolation.",
+   "source_url": "https://raw.githubusercontent.com/xocialize/musetalk-mlx/main/_research/PREFLIGHT.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "SoulX-FlashHead Lite's exact inference config is 4 denoising steps over a 5x16x16 latent at 512x512, 33 frames per chunk with 9 motion frames = 24 new frames = 0.96 s of video at 25 fps",
+   "detail": "Model_Lite/config.json: dim 1536, ffn_dim 8960, num_layers 30, num_heads 12, patch_size [1,1,1], out_dim 128, vae_stride [8,32,32]. flash_head/configs/infer_params.yaml: frame_num 33, motion_frames_latent_num 2, tgt_fps 25, height/width 512, cached_audio_duration 8. flash_head/inference.py: sample_steps = 4 for lite/pro (20 only for 'pretrained'); motion_frames_num = (2-1)*8+1 = 9, so slice_len = 33-9 = 24 frames = 0.96 s. Latent = ((33-1)/8+1) x (512/32) x (512/32) = 5x16x16 = 1280 tokens.",
+   "source_url": "https://huggingface.co/Soul-AILab/SoulX-FlashHead-1_3B/raw/main/Model_Lite/config.json",
+   "strength": "strong"
+  },
+  {
+   "claim": "The 4090's 0.266 s/chunk figure is a torch.compile'd number on both DiT and VAE, so the Mac gap is wider than raw FLOPS suggests — Inductor's MPS/Metal backend is far less mature than its Triton/CUDA path",
+   "detail": "flash_head/src/pipeline/flash_head_pipeline.py sets COMPILE_MODEL = True and COMPILE_VAE = True at module level and calls torch.compile on self.model and on vae.model.encode/decode. Inductor's Metal codegen (torch/_inductor/codegen/mps.py) still emits invalid Metal for code that compiles fine on CUDA and eager MPS (pytorch#152155). So the Mac loses the compile speedup that the 4090 baseline includes.",
+   "source_url": "https://raw.githubusercontent.com/Soul-AILab/SoulX-FlashHead/main/flash_head/src/pipeline/flash_head_pipeline.py",
+   "strength": "strong"
+  },
+  {
+   "claim": "M5 Max measured MLX GEMM wall-clock peak is ~19.9 TFLOPS fp16, against a theoretical ~70 TFLOPS — the 4x-peak-AI-compute marketing does not translate to achieved matmul throughput",
+   "detail": "Creative Strategies' M5 Max analysis: after retuning around larger FP16 matmuls the measured wall-clock peak 'rose to about 19.9 TFLOPS, versus the project's older 15.8 TFLOPS M4 reference point'. The ~70 TFLOPS figure is a paper derivation (40 cores x 1,024 FP16 FMA/cycle x 2). RTX 4090 measured cuBLAS fp16/fp32-accum is ~170 TFLOPS against a 165 TFLOPS spec. Ratio of measured to measured = 19.9/170 = 0.12, i.e. the M5 Max is ~8x slower on dense fp16 matmul in its best framework.",
+   "source_url": "https://creativestrategies.com/research/m5-max-chiplets-thermals-and-performance-per-watt/",
+   "strength": "moderate"
+  },
+  {
+   "claim": "Independent app-level anchor: video diffusion of the Wan/LTX family on M-series runs at roughly 1/8 the speed of a 4090; a hard measurement on M1 Max 64 GB gives 250 s/step for Wan 2.2 at 832x480",
+   "detail": "Measured on M1 Max 64 GB via Metal/MPS: Wan 2.2 14B GGUF Q4_K_S, 832x480, 33 frames, 20 steps = 82 min 45 s total (stage 1 250 s/step, stage 2 236 s/step, VAE decode 101 s). LTX-2 19B distilled Q4_K_M at 512x288, 33 frames, 25 steps = 14.7 s/step. Community summary for LTX-Video: 'runs on M2/M3 Max with 64GB unified memory at roughly 1/8 the speed of a 4090'. Scaling M2/M3 Max -> M5 Max at 1.4-2x gives 1/4 to 1/6 of a 4090, which brackets my FLOP-model estimate of 1/5 to 1/8.",
+   "source_url": "https://lilting.ch/en/articles/ltx2-wan22-mac-local-video-gen",
+   "strength": "moderate"
+  },
+  {
+   "claim": "The 1.3 s audio lead is intrinsic to SoulX's chunked architecture, not an implementation wart — the author tried to remove it, failed, and rolled back",
+   "detail": "docs/plan-4090.md, entry '2026-08-29 (afternoon): explicit-sync detour and V1 rollback'. He replaced paced-feed with timestamped frames + a frontend cursor scheduler to cut 3.2 s to 2.6 s, spent a day fixing ~10 bugs (zero-race, silent half-block contamination, negative timestamps, seam stalls, cursor sign inversion), and the lead crept back from 0.8 s to 1.35 s, matching V1's 1.3 s. His verdict: real constraints (the model's inherent ~0.5 s closed-to-open mouth transition must fit inside the lead window, plus TTS jitter margin) do not change with architecture; 'V1 的 1.3s lead 就是物理下限'. Rolled back at commit 6212d71. Final accepted system opens its mouth at ~3.2 s.",
+   "source_url": "https://github.com/emwstudio/VoxEMW/blob/63560df1512d4778dce86e975954bff5899de692/docs/plan-4090.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "SoulX does not hard-require flash_attn in code — it already falls back to F.scaled_dot_product_attention — but its requirements.txt is full of packages that cannot install on arm64 macOS",
+   "detail": "flash_head/src/modules/flash_head_model.py lines 18-65: try-import flash_attn_interface (FA3), try-import flash_attn (FA2), try-import sageattention, each setting an availability flag; the dispatch function falls through to F.scaled_dot_product_attention both in compatibility_mode and when no backend is available. Meanwhile requirements.txt pins nvidia-nccl-cu12==2.27.3, xfuser>=0.4.3, xformers==0.0.31, decord, mediapipe==0.10.9, and the README mandates flash_attn==2.8.0.post2 with a cu128 torch index. Remaining code blockers are ~8 torch.cuda.synchronize() calls in flash_head_pipeline.py, 'import torch.cuda.amp as amp' and 'with amp.autocast(dtype=torch.float32)' at flash_head_model.py:544, and device='cuda' defaults.",
+   "source_url": "https://raw.githubusercontent.com/Soul-AILab/SoulX-FlashHead/main/flash_head/src/modules/flash_head_model.py",
+   "strength": "strong"
+  },
+  {
+   "claim": "Nobody has tried SoulX-FlashHead on Apple Silicon — zero macOS/MPS/Apple/CPU issues exist on the repo, so there is no community trail to follow",
+   "detail": "Open issues on Soul-AILab/SoulX-FlashHead as of this search: #81 reproduction, #79 wav2vec2 init, #78 LiveKit, #77 distillation conditioning, #76 blink prompt control, #75 pretrained teacher, #74 HF demo broken, #73 generation with certain images, #64 TensorRT?, #63 H100 garbage output, #62 video lip-sync input, #61 pretrained checkpoint release. Not one mentions mac, macOS, MPS, Apple, CPU, AMD or ROCm. The HF card's 'switch to mps for apple devices' is boilerplate in the generic diffusers snippet, not a tested claim — nothing else in the repo or card supports it.",
+   "source_url": "https://github.com/Soul-AILab/SoulX-FlashHead/issues",
+   "strength": "strong"
+  },
+  {
+   "claim": "Conv3d is no longer an MPS blocker for video VAEs — PyTorch 2.14 moved it onto hand-written Metal kernels — so the classic 'Conv3D is not supported on MPS' failure mode is historical",
+   "detail": "PyTorch 2.14 release blog, 'Large MPS Op Migration to Native Metal': 'a further set of MPS operators moved off Apple's MPSGraph framework onto hand-written Metal compute kernels, including index_add, index_select, argmin, argmax, conv3d, median...'. Also relevant: 2.13 landed FlexAttention on Apple Silicon, and 2.14 adds an MPS prefill-attention kernel built on Apple's Metal Performance Primitives (macOS 26.2+), 'porting the approach MLX uses on M5 chips', with 2-4x gains — but only for attention, not for general GEMM. This matters because SoulX's Lite tier uses the LTX causal-3D-conv VAE (flash_head/ltx_video/models/autoencoders/causal_conv3d.py).",
+   "source_url": "https://pytorch.org/blog/pytorch-2-14-release-blog/",
+   "strength": "strong"
+  },
+  {
+   "claim": "MuseTalk is architecturally a single UNet forward per frame at t=0 with whisper-tiny cross-attention — not a diffusion sampler — which is why its latency and cost are an order of magnitude below SoulX's",
+   "detail": "Pipeline per the MLX port README: audio -> whisper-tiny encoder (384-d) -> positional encoding -> cross-attn; face -> 256^2 crop -> VAE.encode(masked) concat VAE.encode(ref) -> 8-ch latent -> UNet(t=0) -> VAE.decode -> paste back. UNet is SD1.x UNet2DConditionModel with in=8, out=4, cross_attention_dim=384. Upstream reports 30 fps+ on a V100 'with negligible starting latency'. Only the UNet and VAE decoder run at inference time.",
+   "source_url": "https://huggingface.co/mlx-community/MuseTalk-1.5-fp16",
+   "strength": "strong"
+  },
+  {
+   "claim": "The MLX port is parity-locked against the PyTorch reference at the pixel level, which is the correctness proof that matters for a 0-star single-author repo",
+   "detail": "PREFLIGHT gates: VAE encode 1.7e-5 / decode 3.4e-5, UNet forward 1.41e-6, whisper encoder 1.6e-5, face-level e2e reconstruction <= 2/255 vs torch. Gate D-visual ran a real 268-frame clip with faithful DWPose-onnx + S3FD crops and bisenet blending: MLX-vs-torch on real crops max|D| = 3, mean 0.023. Runtime is fully torch- and transformers-free (verified with both blocked, lesson M11 — they replaced HF WhisperFeatureExtractor with a self-contained mel, max|D| = 1.3e-5 vs HF). tests/parity and tests/smoke ship in the repo.",
+   "source_url": "https://github.com/xocialize/musetalk-mlx",
+   "strength": "strong"
+  },
+  {
+   "claim": "Tier A beyond SoulX is uniformly worse, and Tier B's PyTorch/MPS path is catastrophically slow — the MLX port is what makes Tier B viable, not MPS",
+   "detail": "Sonic / EchoMimic / Hallo3 / OmniHuman-class models are multi-step video diffusion and 'unable to perform real-time generation' even on datacenter GPUs; EchoMimic's optimized path is ~50 s per 240 frames on a V100 = ~0.2 s/frame = 5 fps. Ditto-talkinghead reaches 30 fps at 512x768 on a 4090 only via TensorRT conversion of its DiT — TensorRT is NVIDIA-only, so it is a hard no on Mac. On the PyTorch/MPS side, LivePortrait on an M1 Pro 32 GB measured 60 s for 32 frames and 650 s for 600 frames (~1 s/frame, ~1 fps, roughly 20x slower than a 4090) and torch.compile acceleration is unsupported on macOS; MuseTalk's own macOS issue #393 (opened Nov 2025) is still unanswered with no fork, patch or measurement.",
+   "source_url": "https://github.com/TMElyralab/MuseTalk/issues/393",
+   "strength": "moderate"
+  },
+  {
+   "claim": "The mmcv/mmpose preprocessing dependency chain does not build on macOS+py3.12, but there is a verified escape route",
+   "detail": "PREFLIGHT lesson M12: 'mmcv/mmpose will not build on macOS+py3.12' (old pkg_resources calls pkgutil.ImpImporter, removed in 3.12; openmmlab ships no macOS wheels). The faithful escape is rtmlib + onnxruntime running the exact upstream DWPose weights (dw-ll_ucoco_384.onnx + yolox_l.onnx from yzd-v/DWPose), zero compilation, identical keypoints ([23:91] = 68 face landmarks), paired with the bundled pure-torch S3FD detector. Also: the bisenet face-parse checkpoint is legacy-tar and needs torch.load(..., weights_only=False) under torch 2.6+.",
+   "source_url": "https://raw.githubusercontent.com/xocialize/musetalk-mlx/main/_research/PREFLIGHT.md",
+   "strength": "strong"
+  },
+  {
+   "claim": "The reference implementation's streaming engineering is renderer-agnostic and should be reused verbatim",
+   "detail": "voxemw/avatar/soulx_server.py implements a three-thread pipeline the author derived empirically: accumulate (0.96 s/chunk, real-time boundary, pads 0.2 s silence slices so real speech can preempt idle within 0.2 s), generate (0.25 s/chunk), and drip (25 fps emit using a cumulative deadline `next_t += frame_interval` rather than per-frame sleep — the latter measured 24.6 fps, making the video content axis run ~1.6% slow and visibly lag by the end of a long reply). His docstring states why serialising them fails: 0.96 + 0.25 + 0.96 = 2.2 s per chunk = 44% of realtime, guaranteed backlog. Interrupts use a generation counter (_flush_seq) so an in-flight chunk is discarded on completion, plus an immediate in-loop flush check so a half-accumulated silence block cannot contaminate the next chunk (bug fixed in 57a6e38).",
+   "source_url": "https://github.com/emwstudio/VoxEMW/blob/63560df1512d4778dce86e975954bff5899de692/voxemw/avatar/soulx_server.py",
+   "strength": "strong"
+  }
+ ],
+ "alternatives": [
+  {
+   "name": "Tier A — SoulX-FlashHead-1_3B Lite (the requested model), ported to MPS",
+   "tradeoff": "Best photorealism and the only tier that animates head pose, blinking and micro-expression from a single still image. But ~8-18 fps on M5 Max (0.4-0.6x realtime), needs a 30-80 line port plus a stripped requirements.txt, loses the torch.compile speedup the 4090 number depends on, and carries an intrinsic ~1.3 s audio lead that alone eats 65% of the 2.0 s budget. Model_Pro is ~1.5 fps and not worth discussing.",
+   "when_to_prefer": "Never on this Mac for a live debate partner. Only if the project later moves to a 4090/5090 box, or for offline (non-interactive) rendering where the 1.3 s lead and sub-realtime throughput do not matter."
+  },
+  {
+   "name": "Tier A — Ditto-talkinghead (antgroup)",
+   "tradeoff": "Reaches 30 fps at 512x768 on a 4090 with a good motion-space design and only 10 denoising steps, but its realtime path is TensorRT-compiled. TensorRT is NVIDIA-only with no Metal equivalent; the eager PyTorch path is well below realtime even on CUDA.",
+   "when_to_prefer": "Only on NVIDIA. Structurally the best Tier-A candidate if the target hardware ever changes."
+  },
+  {
+   "name": "Tier A — Sonic / EchoMimic / Hallo3 / OmniHuman-class",
+   "tradeoff": "Highest visual quality of the whole survey, but multi-step video diffusion that is not realtime on any GPU. EchoMimic's optimized path is ~0.2 s/frame (5 fps) on a V100; Hallo3 is CogVideoX-based. On an M5 Max these are seconds per frame.",
+   "when_to_prefer": "Offline rendering only — e.g. pre-generating a library of idle/talking loops for Tier D. That is actually a genuinely good use for them."
+  },
+  {
+   "name": "Tier B — MuseTalk 1.5 via PyTorch + MPS (no MLX port)",
+   "tradeoff": "Same model and quality, but you inherit the mmcv/mmpose build failure on macOS+py3.12, unresolved macOS issue #393 with no community answer, and MPS throughput that community measurement puts 2-3x below MLX for inference. LivePortrait on MPS measures ~1 fps on M1 Pro, which is the cautionary data point for this path.",
+   "when_to_prefer": "Only if the MLX port fails its own parity/bench tests on your machine and you need a fallback you can debug against upstream. Expect roughly 12-17 fps, not 34."
+  },
+  {
+   "name": "Tier B — Wav2Lip / Wav2Lip-HD / SadTalker",
+   "tradeoff": "Wav2Lip is fast and CPU-tolerable but its 96x96 mouth region looks blurry and dated next to MuseTalk's 256^2 latent inpainting; the artifact is immediately obvious on a large face. SadTalker is 3DMM-coefficient-driven and not realtime. LivePortrait is video-driven (needs a driving performance), not audio-driven, so it does not solve this problem at all.",
+   "when_to_prefer": "Wav2Lip only as an emergency CPU fallback if the GPU is saturated. Do not ship it as the primary look."
+  },
+  {
+   "name": "Tier C — VRM + three.js viseme rig (what VoxEMW v1.9.0 already shipped)",
+   "tradeoff": "Essentially free: runs entirely in the browser at 60 fps, zero server GPU, zero added latency, driven by WebAudio analysis of the audio that is already playing. Stylized, not photoreal. The existing implementation (git tag v1.9.0, web/avatar-vrm.js, 430 lines) maps A/E/I/O/U to VRM aa/ee/ih/oh/ou blendshapes with morph amplification, idle breathing, blinking and emotion states. Live2D and ARKit blendshapes are the same class.",
+   "when_to_prefer": "If the 2.0 s budget turns out tight after STT+LLM+TTS are measured, or if you want zero GPU contention, or if a stylized avatar is acceptable. This is the risk-free option and it is already written and debugged."
+  },
+  {
+   "name": "Tier D — pre-rendered idle/talking video loops, crossfaded on speaking state",
+   "tradeoff": "Zero GPU, zero latency, and genuinely convincing at conversational distance because the footage is real. The lips do not match the words — noticeable if the viewer stares at the mouth, invisible if they are debating. Costs one afternoon of ffmpeg work: cut 3-6 idle loops and 3-6 talking loops, crossfade ~200 ms on speaking-state transitions, randomize loop selection so it does not feel canned.",
+   "when_to_prefer": "Build this FIRST regardless of what else you choose. It is the base layer under MuseTalk (MuseTalk needs a source loop anyway, and its latents/bboxes/masks are precomputed from exactly these clips), it is the fallback when the GPU is busy, and it is what plays during user speech and LLM thinking. If MuseTalk disappoints, Tier D alone is a perfectly shippable product."
+  }
+ ],
+ "latency_estimate": "RECOMMENDED PATH (MuseTalk-MLX): ~0.30-0.50 s of added audio lead, and it does NOT sit on the critical path the way SoulX does. Derivation from the M5 Max 128 GB measurement: at bs=4, 30.6 fps means 131 ms to produce 4 frames = 160 ms of video, so generation runs at 1.22x realtime; at bs=8, 34 fps means 235 ms per 320 ms of video, 1.36x realtime. Streaming lead = audio buffer for the batch (160 ms at bs=4, 320 ms at bs=8) + whisper ±2-frame feature window (~80 ms) + compute (131/235 ms) + VAE-decode/paste-back/JPEG (~20-40 ms). Use bs=4: ~0.40 s. Budget impact: the avatar consumes ~0.4 s of the 2.0 s target, leaving ~1.6 s for VAD endpoint + STT + LLM + TTS time-to-first-audio. Tight but achievable. If it is not, drop to Tier D (0 s) or Tier C (0 s) and lose nothing but photorealism. GPU duty cycle: 25/34 = 74% of the GPU while the assistant speaks, 0% otherwise — and \"otherwise\" is exactly when STT needs the GPU, so the contention is complementary rather than additive. Warm-up: MLX weight load ~1.9 GB (fp16) plus first-batch Metal kernel compilation, expect 3-10 s at process start; do it once at boot, never per turn. REJECTED PATH (SoulX-FlashHead Lite on MPS): ~1.6 s per 0.96 s chunk (central estimate; band 1.3-2.1 s) = ~12 fps = 0.4-0.6x realtime, so it can never keep up with live speech at all — it would fall progressively behind and drop chunks. Even if it were fast enough, its chunked design adds a fixed ~1.3 s audio lead (the author's measured physical floor), giving a first-audio time of 1.3 s + STT + LLM + TTS, which exceeds the 2.0 s target before any other component runs and threatens the 3.0 s ceiling. Both numbers independently disqualify it.",
+ "memory_gb": "MuseTalk-MLX: 7 GB peak measured on the M5 Max 128 GB (fp16 variant; weights on disk are 1.88 GB — VAE + UNet + whisper-tiny encoder). The q8 variant (UNet Linears int8, group_size 64, VAE and whisper kept fp16) is smaller on disk with cosine 1.0 vs fp16 per-pass and decoded-face mean |Δ| 0.41/255 vs the PyTorch reference; a q4 variant also exists. Preprocessing adds ~1-2 GB for the onnxruntime DWPose models (dw-ll_ucoco_384.onnx + yolox_l.onnx) plus S3FD and bisenet, but those are offline-only if you precompute crops/masks for a fixed avatar loop, which you should. Total steady-state runtime footprint ~7-8 GB. On 128 GB this is a non-issue — you have room for MuseTalk + STT + TTS + a 70B-class local LLM simultaneously, which is the one place where the 16 GB -> 128 GB jump genuinely changes the calculus. For reference, SoulX Lite was ~6 GB VRAM on the 4090 (author's measured peak); memory was never why it fails here.",
+ "install_commands": [
+  "# 1. Isolated env for the avatar renderer (keep it separate from the voice pipeline, as the author did on the 4090)",
+  "<LOCAL_HOME>/.local/bin/uv venv --python 3.12 ./.venv-avatar",
+  "# 2. The MLX port (runtime is torch-free; deps are mlx>=0.30.0, numpy, huggingface_hub, opencv-python, librosa, soundfile)",
+  "git clone https://github.com/xocialize/musetalk-mlx ./musetalk-mlx",
+  "<LOCAL_HOME>/.local/bin/uv pip install --python ./.venv-avatar/bin/python -e ./musetalk-mlx",
+  "# 3. Weights (fp16 first; try q8 only if you need the GPU headroom back)",
+  "hf download mlx-community/MuseTalk-1.5-fp16 --local-dir <LOCAL_HOME>/.cache/models/MuseTalk-1.5-fp16",
+  "# hf download mlx-community/MuseTalk-1.5-q8 --local-dir <LOCAL_HOME>/.cache/models/MuseTalk-1.5-q8",
+  "# 4. VERIFY BEFORE BUILDING ANYTHING ON TOP — this repo has 0 stars and one author; reproduce its own gates on your machine",
+  "<LOCAL_HOME>/.local/bin/uv pip install --python ./.venv-avatar/bin/python -e './musetalk-mlx[parity]'",
+  "cd ./musetalk-mlx && ../.venv-avatar/bin/python -m pytest tests/smoke -q",
+  "cd ./musetalk-mlx && ../.venv-avatar/bin/python -m pytest tests/parity -q",
+  "cd ./musetalk-mlx && ../.venv-avatar/bin/python scripts/bench_realtime.py   # expect bs=4 ~30 fps, bs=8 ~34 fps, peak ~7 GB",
+  "# 5. Offline preprocessing for the fixed avatar loop (crops, bboxes, masks, ref latents — run once, cache to disk)",
+  "<LOCAL_HOME>/.local/bin/uv pip install --python ./.venv-avatar/bin/python rtmlib onnxruntime",
+  "hf download yzd-v/DWPose --local-dir <LOCAL_HOME>/.cache/models/DWPose   # dw-ll_ucoco_384.onnx + yolox_l.onnx",
+  "# 6. Tier D base layer (build this first, it is the fallback and MuseTalk's source loop in one)",
+  "ffmpeg -i source.mp4 -ss 00:00:12 -t 6 -an -c:v libx264 -crf 18 -pix_fmt yuv420p idle_loop_01.mp4"
+ ],
+ "risks": [
+  "The 34 fps figure comes from a single repo with 0 stars, one author (MVS Collective / xocialize-code), created 2026-06-05 and last pushed 2026-06-15, self-reported in its own PREFLIGHT.md. It is unusually well-documented for a solo port (per-component parity gates, real-clip visual gate, 12 numbered lessons) and it names the exact hardware, but nobody else has reproduced it. Run tests/parity and scripts/bench_realtime.py on the target machine BEFORE any integration work. If either fails, the entire Tier-B recommendation collapses back to Tier C/D.",
+  "Naming inconsistency between the HF card ('MuseTalk-1.5-MLX-fp16') and the repo README ('MuseTalk-1.5-fp16') in the from_pretrained_mlx call — trivial, but a sign the docs were not end-to-end tested. Read musetalk_mlx/config.py and pipeline_mlx.py rather than trusting either snippet.",
+  "34 fps against a 25 fps requirement is only 1.36x headroom, versus the 3.6x the author had on the 4090. Any GPU contention from TTS or a local LLM eats straight into it. Mitigation, in order: run the avatar only while the assistant speaks (idle loop otherwise), prefer bs=8 over bs=4 for throughput if you can afford the extra 160 ms of lead, drop to the q8 variant, or render at 20 fps and accept slightly choppier motion.",
+  "MuseTalk animates only the mouth region at 256^2 pasted back into the frame. It produces no head motion, no blinking, no eyebrow movement — those must come from the underlying source loop. With a single still image the head is frozen and the result is uncanny. You need real footage of the person. Also expect the classic MuseTalk artifact set: a visible blend seam at the jaw on some frames, mushy teeth, and per-frame jitter (upstream acknowledges 'there exists some jitter as the current pipeline adopts single-frame generation').",
+  "fp16 batched output on Metal is batch-size-dependent: PREFLIGHT lesson M10 records the same frame decoded at bs=4 vs bs=2 differing by up to ~20/255 on a single pixel (different Metal kernels / accumulation order), while mean |Δ| stays ~0.4. Harmless visually, but it means you must not gate any regression test on single-pixel max error, and you should pin the batch size in production so output is deterministic run to run.",
+  "The face-crop/blend/paste-back path is upstream CPU code the caller must wire in, and mmcv/mmpose will not build on macOS+py3.12. The rtmlib+onnxruntime escape works but is extra integration surface. Precompute everything for a fixed avatar loop offline so the runtime path is just numpy compositing — if you try to do live face detection per frame you will lose the frame budget to the CPU.",
+  "SoulX's 1.3 s lead problem has a cousin here: audio and video must be co-scheduled or the lips desync. Reuse the reference implementation's paced-feed clock (feed the renderer at PLAYBACK time, not generation time) and cumulative-deadline drip loop rather than inventing a new sync scheme — the author burned a full day proving that timestamp/cursor architectures do not beat the simple one.",
+  "macOS 26.5.2 is ahead of the macOS 26.2 floor for PyTorch's new MPP attention kernels, so no OS blocker — but MLX 0.30+ and Metal 4 tensor support on M5 are new enough that a point-release regression is a live possibility. Pin mlx and record the working version.",
+  "Nothing here is a hedge against SoulX being wrong-verdict: if the project later moves to NVIDIA hardware, revisit. SoulX Lite genuinely is excellent on a 4090 (96 fps, ~6 GB, 3.6x realtime, natural blinks and micro-expression from one still image). The verdict against it is specific to Apple Silicon plus a 2.0 s budget, not a judgment on the model."
+ ],
+ "open_questions": [
+  "Does PyTorch MPS route general GEMM through the M5 Neural Accelerators, or only the new prefill-attention kernel? The 2.14 blog documents an MPP-based attention kernel 'porting the approach MLX uses on M5 chips' but says nothing about matmul. If PyTorch MPS GEMM is still on the simdgroup-matrix path, every PyTorch-based option on this Mac is running at roughly M4-Max fp16 throughput and my SoulX estimate should shift toward the pessimistic 8 fps end. Resolvable in ten minutes: benchmark torch.matmul on MPS at 4096^3 bf16 and compare against mx.matmul at the same shape.",
+  "What was the M5 Max's measured MLX GEMM ceiling actually measuring? The 19.9 TFLOPS figure (vs a 70 TFLOPS paper peak) comes from one analysis whose methodology I could not fully verify, and the separate M5 roofline study measures the base 10-core chip's scalar ALU path (6,004 GFLOPS fp16), not the NAX. My 1/5-to-1/8 ratio is triangulated from three independent sources that agree, so I am confident in the band, but the single number is soft. Measure it directly rather than trusting my ratio.",
+  "How much CPU does the per-frame paste-back actually cost once bisenet masks and DWPose bboxes are precomputed? The 34 fps gate covers only the neural core (VAE encode x2 + UNet + VAE decode). If the compositing path costs 10 ms/frame it eats a quarter of the remaining headroom. Measure end-to-end wall time from PCM in to JPEG out, not the neural core in isolation.",
+  "Is the q8 variant meaningfully faster than fp16, or only smaller? Both HF cards quote the identical '~34 faces/sec' number, which reads like copy-paste rather than a separate measurement. If q8 buys real throughput it changes the headroom calculus significantly. bench_realtime.py will answer this.",
+  "What does the combined GPU load actually look like with STT + TTS + avatar live at once? Every number in this report is a single-workload measurement. The failure mode I cannot rule out from research alone is TTS time-to-first-audio degrading under avatar contention, which would blow the latency budget from a direction nobody is watching. Instrument the whole pipeline before declaring the budget met.",
+  "Would an MLX port of SoulX close the gap? MuseTalk-MLX's 34 fps implies MLX achieves substantially better effective throughput on this chip than PyTorch MPS does, and the same author has already shipped a second MLX DiT port (lens-mlx: a GPT-OSS-conditioned text-to-image DiT + FLUX.2 VAE). A SoulX MLX port might reach ~20-25 fps. I am not recommending it — it is multi-week work with no prior art for the Wan DiT or the LTX causal-3D VAE in MLX, and it would still carry the fatal 1.3 s lead — but it is the honest answer to 'is SoulX permanently impossible here'. It is not; it is just not worth it.",
+  "Does the deceased-public-figure source footage exist in enough quantity and quality? MuseTalk needs a clean, front-facing, well-lit idle loop at consistent scale. If the available archive is all podium shots at odd angles, Tier B quality degrades sharply and Tier C/D become relatively more attractive on the merits, independent of any other consideration."
+ ]
+}

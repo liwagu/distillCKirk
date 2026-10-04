@@ -1,0 +1,9 @@
+Generated with the built-in image_gen tool.
+
+Use case: ads-marketing
+Asset type: finished standalone YouTube video end card, flat raster graphic ready to insert as the final frame of a landscape video.
+Create a polished, restrained, professional technology creator outro card. Wide 16:9 horizontal canvas, ideally 3840 x 2160. Full bleed opaque deep charcoal background, soft warm-gray gradient, very fine film grain and a few extremely subtle flowing audio-wave lines at the outer edges, tying into an AI voice/avatar technical video. The central area is calm and uncluttered.
+Typography is the subject: large crisp modern sans-serif headline centered slightly above the midpoint. Render the exact English headline "Thanks for watching" as one line, perfectly spelled, high contrast warm white, beautifully spaced.
+Beneath it place a generously spaced horizontal row of three calls to action: "SUBSCRIBE", "LIKE", "COMMENT", in that order. SUBSCRIBE is the main red rounded button with a simple white play triangle icon; LIKE has a clear minimal outline thumbs-up icon; COMMENT has a minimal outline speech-bubble icon. Match the icon weight and text scale, elegant alignment, strong readable type rather than tiny text. Keep all four text strings fully inside generous 10% safe margins. Broad negative space and a confident clean composition; the CTA row should be readable on a phone.
+Text verbatim and only: "Thanks for watching", "SUBSCRIBE", "LIKE", "COMMENT". Watching is spelled W-A-T-C-H-I-N-G.
+No people, portraits, screenshots, editing software, mockup device, video preview boxes, fake channel names, extra slogans, watermark, stock-photo imagery, neon cyberpunk clutter, fake photographic depth, exaggerated 3D lettering or illegible decoration. This must be the actual complete end card graphic, not a screenshot of an end card in an application. Opaque background, not transparent.

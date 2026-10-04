@@ -1,0 +1,12 @@
+[submodule "ref-VoxEMW"]
+	path = ref-VoxEMW
+	url = https://github.com/emwstudio/VoxEMW.git
+[submodule "ref-musetalk-mlx"]
+	path = ref-musetalk-mlx
+	url = https://github.com/xocialize/musetalk-mlx.git
+[submodule "ref-feathertalk"]
+	path = ref-feathertalk
+	url = https://github.com/anliyuan/FeatherTalk.git
+[submodule "ref-ml-stable-diffusion"]
+	path = ref-ml-stable-diffusion
+	url = https://github.com/apple/ml-stable-diffusion.git

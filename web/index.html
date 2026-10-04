@@ -1,0 +1,28 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Debate Practice</title>
+<link rel="stylesheet" href="/style.css">
+<div id="app">
+  <header>
+    <span class="dot" id="dot"></span>
+    <span id="state">disconnected</span>
+    <span id="brain"></span>
+    <span class="spacer"></span>
+    <span id="stats"></span>
+    <button id="btn">Start</button>
+  </header>
+  <div id="ai-badge">AI practice partner — not a real person. Audio and video are synthetic.</div>
+
+  <div id="stage">
+    <canvas id="face"></canvas>
+    <div id="stage-empty">
+      <div class="big">Ready for a conversation</div>
+      <div class="small">Press Start, allow the microphone, and speak in English.</div>
+    </div>
+  </div>
+
+  <main id="log"></main>
+  <footer id="hint">Hold a normal conversation. Just start talking to interrupt.</footer>
+</div>
+<script src="/app.js"></script>

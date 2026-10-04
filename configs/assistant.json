@@ -1,0 +1,58 @@
+{
+  "persona": "personas/ck-gender.md",
+  "llm_model": "mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit",
+  "llm_url": "http://127.0.0.1:8097",
+  "max_tokens": 300,
+  "llm_timeout_s": 20,
+  "llm_warm_timeout_s": 12,
+  "temperature": 0.7,
+  "chat_turns": 12,
+  "asr_model": "Qwen/Qwen3-ASR-1.7B",
+  "hotwords": [
+    "feminism"
+  ],
+  "corrections": {},
+  "tts_model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+  "tts_min_words": 12,
+  "vad": {
+    "threshold": 0.5,
+    "start_frames": 2,
+    "hangover_ms": 350,
+    "turn_threshold": 0.8,
+    "threads": 1,
+    "max_silence_ms": 900
+  },
+  "host": "127.0.0.1",
+  "port": 8000,
+  "word_ceiling": 90,
+  "semantic_guard": {
+    "enabled": true,
+    "threshold": 0.5,
+    "strict": false,
+    "timeout": 10.0
+  },
+  "keepwarm_s": 15,
+  "face": {
+    "enabled": true,
+    "base_video": "web/media/base_fox_listen.mp4",
+    "idle_frame": 120,
+    "fps": 20,
+    "r0": 9,
+    "jpeg_quality": 80,
+    "mask_mode": "mouth",
+    "background": {
+      "enabled": true,
+      "image": null,
+      "top": "#0b1a33",
+      "bottom": "#1c2f57"
+    },
+    "expand": 0.1,
+    "pre_crop": [
+      0.5,
+      0.0,
+      1.0,
+      0.83
+    ],
+    "view_scale": 3.0
+  }
+}

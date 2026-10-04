@@ -1,0 +1,54 @@
+# Credentials and private environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local environments, editor state and private session archives
+.venv*/
+.backups/
+.omc/
+.publish/
+.claude/
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+node_modules/
+
+# Runtime data and generated model artifacts
+logs/
+*.log
+*.pcm
+configs/*.local.json
+assets/
+voxck/coreml_cache/
+*.mlpackage/
+*.mlmodelc/
+*.safetensors
+*.onnx
+*.tflite
+*.npz
+*.npy
+*.pt
+*.pth
+*.ckpt
+
+# Source clips, reference voices, private transcripts and device inventory
+web/media/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+video-script/**/transcript/
+video-script/**/review-frames/
+video-script/**/tools/
+video-script/**/source/
+video-script/**/import-*.json
+video-script/**/source-deletion.json
+video-script/**/logs-derived-*.md
+
+# Pinned ref-* repositories are submodules; do not vendor their local caches.

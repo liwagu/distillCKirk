@@ -1,0 +1,22 @@
+{
+  "source": "Finished English.mp4",
+  "duration_seconds": 430.358639,
+  "demo_links": {
+    "youtube": "https://www.youtube.com/watch?v=DtIkQjkBrZg",
+    "bilibili": "https://www.bilibili.com/video/BV14oHv6qEDb"
+  },
+  "frames": [
+    {
+      "file": "conversation.jpg",
+      "timestamp_seconds": 225
+    },
+    {
+      "file": "speaking.jpg",
+      "timestamp_seconds": 305
+    },
+    {
+      "file": "follow-up.jpg",
+      "timestamp_seconds": 345
+    }
+  ]
+}

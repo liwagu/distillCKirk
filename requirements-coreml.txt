@@ -1,0 +1,8 @@
+# Separate conversion environment. Observed direct dependencies, not a lock file.
+# Do not install Apple's full upstream setup.py: its older pins differ from this project.
+torch==2.14.0
+diffusers==0.40.0
+coremltools==9.0
+safetensors==0.8.0
+numpy==2.5.3
+huggingface-hub==1.33.0
