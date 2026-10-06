@@ -30,6 +30,7 @@ from . import persona as persona_mod
 from . import guard
 from .semantic_guard import SemanticGuard
 from .llm import Llm
+from .conversation import ConversationJournal, ResumeError, load_resume
 
 log = logging.getLogger("voxck")
 ROOT = Path(__file__).resolve().parent.parent
@@ -53,6 +54,13 @@ class PlaybackTurn:
     assistant: dict | None = None
 
 
+@dataclass
+class InputUtterance:
+    pcm: np.ndarray
+    ended_at: float
+    clip_id: str = ""
+
+
 class Session:
     """一条浏览器连接的回合状态机。"""
 
@@ -73,6 +81,29 @@ class Session:
         self.speaking = False
         self.generating = False
         self.reply_task: asyncio.Task | None = None
+        # 用户输入与可取消的回复分开：新 speech_start 绝不能取消 ASR。
+        self.input_queue: asyncio.Queue[InputUtterance] = asyncio.Queue()
+        self.input_task: asyncio.Task | None = None
+        self.user_speaking = False
+        self._input_busy = False
+        self._processing_audio = False
+        self._input_revision = 0
+        self._answered_revision = -1
+        self._latest_input: tuple[dict, float, float] | None = None
+        self._closing = False
+        self._closed = False
+        self.journal: ConversationJournal | None = None
+        self.resume_count = 0
+        self._user_clip_ids: dict[int, str] = {}
+        archive_root = app.get("conversation_root")
+        if archive_root is not None:
+            self.journal = ConversationJournal(Path(archive_root))
+            try:
+                restored = load_resume(Path(archive_root))
+                self.history.extend(restored)
+                self.resume_count = len(restored)
+            except ResumeError:
+                log.exception("Conversation restore rejected; seed preserved")
         self.active_turn: PlaybackTurn | None = None
         self.playback_turns: dict[int, PlaybackTurn] = {}
         self._respond_lock = asyncio.Lock()
@@ -105,7 +136,11 @@ class Session:
     # ── 出站 ──────────────────────────────────────────────────────────────
     async def send(self, **kw):
         if not self.ws.closed:
-            await self.ws.send_str(json.dumps(kw))
+            try:
+                await self.ws.send_str(json.dumps(kw))
+            except (ConnectionError, aiohttp.ClientConnectionError):
+                # 连接关闭与 closed 标志更新可以有先后差；输入仍必须落盘、排空。
+                log.debug("WebSocket closed before text delivery")
 
     # 下行二进制帧格式：首字节 'A' = 16k int16 PCM；'V' = 视频帧，后接 <H 回合id><I pts毫秒> + JPEG
     async def send_audio(self, pcm: bytes):
@@ -124,14 +159,26 @@ class Session:
         if not text:
             return
         if turn.assistant is not None:
+            if turn.assistant["content"] == text:
+                return
             turn.assistant["content"] = text
+            self._archive_assistant(turn, text)
             return
         # 迟到的旧回合进度必须插回其原始 user 后面，不能污染新回合的顺序。
         for i, message in enumerate(self.history):
             if message is turn.user:
                 turn.assistant = {"role": "assistant", "content": text}
                 self.history.insert(i + 1, turn.assistant)
+                self._archive_assistant(turn, text)
                 return
+
+    def _archive_assistant(self, turn: PlaybackTurn, text: str) -> None:
+        if self.journal is not None:
+            try:
+                self.journal.record_assistant(turn.id, text, turn.interrupted,
+                    after_clip_id=self._user_clip_ids.get(id(turn.user), ""))
+            except OSError:
+                log.exception("Could not archive assistant playback")
 
     async def on_control(self, message: dict) -> None:
         """浏览器报告实际播放进度。旧回合 ACK 可补历史，不能结束新回合。"""
@@ -242,6 +289,8 @@ class Session:
 
     # ── 入站音频 ──────────────────────────────────────────────────────────
     async def on_audio(self, pcm: bytes):
+        if self._closing:
+            return
         # 诊断：确认上行音频真的到了，以及它有没有声音（全静音 = 麦克风没通）
         self._rx_bytes += len(pcm)
         a = np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0
@@ -255,20 +304,152 @@ class Session:
                      self._rx_bytes / 2 / 16000, self._rx_peak,
                      "  ← 一直是 0，麦克风没通" if self._rx_peak < 0.002 else "")
             self._rx_peak = 0.0
-        for ev, buf in self.vad.feed(pcm):
-            log.info("VAD 事件: %s%s", ev,
-                     f" ({buf.size/16000:.2f}s)" if buf is not None else "")
-            if ev == "speech_start":
-                if self.speaking or (self.reply_task and not self.reply_task.done()):
-                    await self.interrupt()
-                await self.send(type="state", state="listening")
-            elif ev == "speech_end":
-                self.t_speech_end = time.perf_counter()
-                await self.send(type="state", state="thinking")
-            elif ev == "turn_complete":
-                if self.speaking or (self.reply_task and not self.reply_task.done()):
-                    await self.interrupt()
-                self.reply_task = asyncio.create_task(self.respond(buf))
+        self._processing_audio = True
+        try:
+            for ev, buf in self.vad.feed(pcm):
+                log.info("VAD 事件: %s%s", ev,
+                         f" ({buf.size/16000:.2f}s)" if buf is not None else "")
+                if ev == "speech_start":
+                    self.user_speaking = True
+                    self._input_revision += 1
+                    if self.speaking or (self.reply_task and not self.reply_task.done()):
+                        await self.interrupt()
+                    await self.send(type="state", state="listening")
+                elif ev == "speech_end":
+                    self.user_speaking = False
+                    self.t_speech_end = time.perf_counter()
+                    await self.send(type="state", state="transcribing")
+                elif ev == "turn_complete":
+                    # 在任何 await 之前保存并入队；同一包里的下一次开口也不会丢这段。
+                    self._enqueue_input(buf)
+                    if self.speaking or (self.reply_task and not self.reply_task.done()):
+                        await self.interrupt()
+        finally:
+            self._processing_audio = False
+            self._maybe_answer()
+
+    def _enqueue_input(self, pcm: np.ndarray) -> None:
+        job = InputUtterance(np.asarray(pcm, dtype=np.float32).copy(),
+                             self.t_speech_end or time.perf_counter())
+        if self.journal is not None:
+            try:
+                job.clip_id = self.journal.save_audio(job.pcm)
+            except (OSError, ValueError):
+                log.exception("Audio backup failed; input remains queued in memory")
+                asyncio.create_task(self.send(type="sys", text=
+                    "Audio backup failed. This segment is still being transcribed."))
+        self._input_revision += 1
+        self.input_queue.put_nowait(job)
+        if self.input_task is None or self.input_task.done():
+            self.input_task = asyncio.create_task(self._drain_inputs())
+
+    async def _transcribe_input(self, job: InputUtterance) -> tuple[dict, float, float] | None:
+        async with self.gpu:
+            started = time.perf_counter()
+            text = await self._mlx(self.asr.transcribe, job.pcm)
+        asr_ms = (time.perf_counter() - started) * 1000
+        text = (text or "").strip()
+        if not text:
+            if self.journal is not None:
+                self.journal.record_error(job.clip_id, "ASR returned no transcript")
+            await self.send(type="sys", text="Could not transcribe a speech segment. "
+                            + ("Its audio was saved locally. " if job.clip_id else "")
+                            + "Please repeat that part.")
+            return None
+        user = {"role": "user", "content": text}
+        self._user_clip_ids[id(user)] = job.clip_id
+        # 真实历史保留对象与顺序；模型请求里再合并连续的用户片段。
+        self.history.append(user)
+        if self.journal is not None:
+            try:
+                self.journal.record_user(job.clip_id, text)
+            except OSError:
+                log.exception("Transcript backup failed")
+                await self.send(type="sys", text="Transcript backup failed; the text is still in this conversation.")
+        await self.send(type="user", text=text)
+        log.info("input_transcribed clip=%s duration_s=%.3f words=%d", job.clip_id,
+                 job.pcm.size / 16000, len(text.split()))
+        return user, asr_ms, job.ended_at
+
+    async def _drain_inputs(self) -> None:
+        self._input_busy = True
+        try:
+            while not self.input_queue.empty():
+                job = self.input_queue.get_nowait()
+                try:
+                    result = await self._transcribe_input(job)
+                    if result is not None:
+                        self._latest_input = result
+                    else:
+                        self._latest_input = None
+                except Exception as error:
+                    self._latest_input = None
+                    log.exception("Input transcription failed")
+                    if self.journal is not None:
+                        with contextlib.suppress(OSError):
+                            self.journal.record_error(job.clip_id, error)
+                    with contextlib.suppress(ConnectionError, aiohttp.ClientConnectionError):
+                        await self.send(type="sys", text="Speech transcription failed. "
+                                        + ("Its audio was saved locally. " if job.clip_id else "")
+                                        + "Please repeat that part.")
+                finally:
+                    self.input_queue.task_done()
+        finally:
+            self._input_busy = False
+            self._maybe_answer()
+
+    def _maybe_answer(self) -> None:
+        if (self._closing or self.ws.closed or self.user_speaking or self._input_busy
+                or self._processing_audio or not self.input_queue.empty()
+                or self._latest_input is None or self._answered_revision == self._input_revision):
+            return
+        if self.reply_task is not None and not self.reply_task.done():
+            return
+        revision = self._input_revision
+        self._answered_revision = revision
+        self.reply_task = asyncio.create_task(self._answer_latest(revision))
+
+    async def _answer_latest(self, revision: int) -> None:
+        # create_task 后的新语音可能先到；再次验证，避免开始回答半截发言。
+        if (self._closing or self.ws.closed or self.user_speaking or self._input_busy
+                or not self.input_queue.empty() or revision != self._input_revision):
+            self._answered_revision = -1
+            return
+        user, asr_ms, ended_at = self._latest_input
+        async with self._respond_lock:
+            await self._respond_user(user, asr_ms, ended_at)
+
+    def _request_history(self) -> list[dict]:
+        messages: list[dict] = []
+        for message in self.history:
+            if (messages and message["role"] == "user" and messages[-1]["role"] == "user"):
+                messages[-1]["content"] += "\n" + message["content"]
+            else:
+                messages.append(dict(message))
+        keep = self.cfg["chat_turns"] * 2
+        # 本地完整历史不裁剪。请求窗口按合并后的轮次计算，整段用户论述不会被切掉。
+        if len(messages) - 1 > keep + 8:
+            messages = [messages[0]] + messages[-keep:]
+        return messages
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closing = True
+        try:
+            await self.interrupt()
+        finally:
+            try:
+                if self.input_task is not None:
+                    await asyncio.shield(self.input_task)
+            finally:
+                if self.idle_task is not None:
+                    self.idle_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await self.idle_task
+                if self.journal is not None:
+                    self.journal.close()
+                self._closed = True
 
     async def interrupt(self):
         """打断：停生成、停合成、清前端队列。"""
@@ -290,27 +471,22 @@ class Session:
 
     # ── 一个回合 ──────────────────────────────────────────────────────────
     async def respond(self, pcm: np.ndarray):
+        """Compatibility entry point; the live microphone uses the independent input queue."""
         async with self._respond_lock:
             await self._respond(pcm)
 
     async def _respond(self, pcm: np.ndarray):
-        t0 = self.t_speech_end or time.perf_counter()
+        result = await self._transcribe_input(InputUtterance(pcm,
+            self.t_speech_end or time.perf_counter()))
+        if result is not None:
+            await self._respond_user(*result)
+
+    async def _respond_user(self, user: dict, asr_ms: float, t0: float):
+        text = user["content"]
         turn: PlaybackTurn | None = None
         checks: list[asyncio.Task] = []
         self.generating = True
         try:
-            async with self.gpu:                            # ASR 独占 GPU
-                t_asr = time.perf_counter()
-                text = await self._mlx(self.asr.transcribe, pcm)
-            asr_ms = (time.perf_counter() - t_asr) * 1000
-            text = (text or "").strip()
-            if not text:
-                await self.send(type="state", state="listening")
-                return
-            await self.send(type="user", text=text)
-            user = {"role": "user", "content": text}
-            self.history.append(user)
-
             self.speaking = True
             self.turn_id = self.turn_id % 0xFFFF + 1
             turn_id = self.turn_id
@@ -444,7 +620,7 @@ class Session:
                 await accept(sent)
 
             # 尾部提醒保持最后一条是当前 user；明确要求重说时不要求换开场。
-            msgs = list(self.history)
+            msgs = self._request_history()
             if self.recent_openers and not restatement:
                 msgs.insert(-1, {"role": "system", "content":
                     "You have already opened recent turns with these lines. Open differently "
@@ -557,11 +733,6 @@ class Session:
                     cached=self.llm.cached_tokens, prompt_tokens=self.llm.prompt_tokens)
             turn.generation_done = True
             await self.send(type="generation_done", id=turn_id, audio_ms=round(turn.audio_ms), text=reply)
-            # 滚动窗口：保留 system + 最近 N 轮。批量淘汰以摊薄前缀失效
-            # （实测 30 轮时逐轮淘汰命中率掉到 61%，批量可摊薄）
-            keep = self.cfg["chat_turns"] * 2
-            if len(self.history) - 1 > keep + 8:
-                self.history = [self.history[0]] + self.history[-keep:]
         except asyncio.CancelledError:
             raise
         except Exception as e:
@@ -590,6 +761,10 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
     await ws.prepare(request)
     sess = Session(ws, request.app)
     log.info("client connected")
+    if sess.resume_count:
+        await sess.send(type="sys", text=f"Restored {sess.resume_count} saved messages. Continue when ready.")
+        for message in sess.history[1:]:
+            await sess.send(type="restored", role=message["role"], text=message["content"])
     await sess.start_face()
     try:
         async for msg in ws:
@@ -603,20 +778,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
                 if isinstance(message, dict):
                     await sess.on_control(message)
     finally:
-        sess.face_stop.set()
-        if sess.active_turn is not None:
-            sess.active_turn.interrupted = True
-        sess.active_turn = None
-        sess.speaking = False
-        if sess.reply_task and not sess.reply_task.done():
-            sess.reply_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sess.reply_task
-        if sess.idle_task:
-            sess.idle_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sess.idle_task
-        await sess._mlx(sess.tts.interrupt)
+        await sess.close()
         log.info("client gone")
     return ws
 
@@ -624,6 +786,7 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 def build_app(cfg: dict) -> web.Application:
     app = web.Application()
     app["cfg"] = cfg
+    app["conversation_root"] = ROOT / cfg.get("conversation_dir", "conversations")
     app["ready"] = False
     app["llm_ready"] = False
     app["persona"] = persona_mod.load(ROOT / cfg["persona"])

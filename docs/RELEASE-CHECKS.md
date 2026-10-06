@@ -2,6 +2,12 @@
 
 Publication audit: **2026-10-05**.
 
+## Conversation-history update — 2026-10-06
+
+The updated publication checkout passed **55 Python unit regressions**, the existing **6 frontend playback scenarios**, and `node --check web/app.js`. New regressions cover interruption-safe FIFO transcription, same-packet VAD events, empty/failed ASR, transport reset, shutdown draining, private atomic audio/text archives, and validated one-use restoration. These checks used the existing development environment against the exported source without launching a second avatar service.
+
+The update also excludes the complete `conversations/` directory from Git. Real recordings, transcript journals, and resume seeds are runtime data and are not part of the source release. The earlier release results below remain historical. See [ASR-INPUT-FIX-2026-10-05.md](ASR-INPUT-FIX-2026-10-05.md) for the original defect and the development live-check boundaries.
+
 ## Checks executed on the public source snapshot
 
 | Check | Result | What it establishes |

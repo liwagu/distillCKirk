@@ -20,6 +20,7 @@ node_modules/
 
 # Runtime data and generated model artifacts
 logs/
+conversations/
 *.log
 *.pcm
 configs/*.local.json

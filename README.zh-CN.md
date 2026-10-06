@@ -71,6 +71,20 @@ cp .env.example .env.local
 
 浏览器访问 `http://127.0.0.1:8000`，点击 Start 并允许麦克风。说话时可直接开口打断。Stop/Start 会开新会话；远程大脑失败不会自动切换为本地 Qwen。
 
+## 对话存档与恢复
+
+每段完整发言在转写前保存到 `conversations/session-*/audio/*.wav`。同目录的 `events.jsonl` 记录完整转写及实际播放的回复段。独立队列负责转写，新开口只打断回复，不取消已经收到的语音；连续用户片段在模型请求里合并。完整本地历史保留，模型仍使用最近对话窗口。
+
+如需接着指定对话聊，先准备 `conversations/resume-next.json`，再点击 Start：
+
+```json
+{"messages":[{"role":"user","content":"My earlier question."},{"role":"assistant","content":"The reply I heard."}]}
+```
+
+仅接受 `user` 和 `assistant`。下次连接会加载并显示通过校验的历史，将 seed 归档为 `resume-consumed-*.json`；无效 seed 保留。恢复后等用户开口再回答。Stop 会等已接受的转写完成后关闭存档。目录和文件仅当前用户可读，整个 `conversations/` 已加入 Git 忽略规则。
+
+目前是本地持久存档与显式恢复，还不是每次 Stop/Start 自动载入的长期记忆。超出模型最近窗口的旧内容也不会自动召回。实现与验证见 [ASR-INPUT-FIX-2026-10-05.md](docs/ASR-INPUT-FIX-2026-10-05.md)。
+
 ## 验证与目前的限制
 
 仓库保留回合生命周期、播放 ACK、静默画面、重复回复和关闭 thinking 等回归检查。详见 [RELEASE-CHECKS.md](docs/RELEASE-CHECKS.md)。历史实测文档保留研究过程与被否定的方案，读取当前架构时应以上方说明为准。

@@ -263,7 +263,7 @@ const FACE = {
 // ── UI ────────────────────────────────────────────────────────────────────
 function setState(s) {
   els.state.textContent = s;
-  els.dot.className = "dot " + (["listening", "thinking", "speaking"].includes(s) ? s : "");
+  els.dot.className = "dot " + (["listening", "thinking", "speaking", "transcribing"].includes(s) ? s : "");
   els.stage.classList.toggle("talking", s === "speaking");
 }
 function addTurn(who, text, cls) {
@@ -375,6 +375,8 @@ function connect() {
       }
     }
     else if (m.type === "user") addTurn("you", m.text, "you");
+    else if (m.type === "restored") addTurn(m.role === "user" ? "you" : "CK", m.text,
+      m.role === "user" ? "you" : "ck");
     else if (m.type === "assistant") {
       if (m.id !== undefined && m.id !== CAPTION.turn) return;
       if (CAPTION.bubble && (m.id === undefined || m.id === CAPTION.turn)) { CAPTION.finalText = m.text; curTurn = CAPTION.bubble; }

@@ -76,6 +76,10 @@ Configured timing is a starting point, not a universal speaking style: VAD thres
 
 `voxck/asr.py` uses `mlx-qwen3-asr` with `Qwen/Qwen3-ASR-1.7B`. Its actual implementation is MLX, so earlier transformer-specific warnings about a `-hf` variant do not apply to this path. It accepts normalized 16 kHz waveform data and transcribes English. The configured hotword list contains only `feminism`; broad hotword lists can bias transcription toward words that were not spoken.
 
+Completed microphone segments are archived before queueing and transcribed by a separate FIFO worker. New speech cancels only the reply task, so accepted input survives interruption and connection teardown. A reply starts after the input queue drains and speech has stopped. Consecutive user fragments are merged in the model request without changing the real history objects used by playback acknowledgements. Full local history is retained; the LLM request uses a bounded recent window.
+
+`voxck/conversation.py` writes private session WAV files and an append-only JSONL event journal under ignored `conversations/`. Assistant updates include their original user clip anchor and only contain fully played speech segments. Empty or failed ASR emits a visible error and cannot trigger a reply to stale input. Audio saved before the failure remains available locally.
+
 ## 4. Persona and conversation brain
 
 `voxck/persona.py` reads the persona frontmatter and Markdown body. The body becomes a system prompt; frontmatter supplies display and reference-audio settings.
@@ -169,7 +173,7 @@ When the user speaks during reply playback:
 3. Backend synthesis/rendering for the old turn becomes obsolete; late frame decodes and acknowledgements cannot complete the new turn.
 4. The next user turn is recognized and sent with the played history that remains.
 
-The backend distinguishes **generation completed** from **playback completed**. A reply may finish generating while many seconds are still audible. The session remains speaking until playback completion or interruption. Stop and connection teardown use the same cancellation discipline. A fresh Start opens a new backend conversation; old transcript bubbles on screen do not carry its context into the new session.
+The backend distinguishes **generation completed** from **playback completed**. A reply may finish generating while many seconds are still audible. The session remains speaking until playback completion or interruption. Stop and connection teardown cancel output while draining accepted input into its archive. A fresh Start opens a new backend conversation unless a valid `conversations/resume-next.json` seed was prepared. That one-use seed restores user/assistant history and displays it through `restored` messages, then becomes `resume-consumed-*.json`. It does not start an answer automatically. Archives alone do not provide automatic cross-session memory or retrieval of older context.
 
 ## 9. Why the mouth stays closed during silence
 
@@ -193,6 +197,7 @@ The finished linked video is evidence that the demonstrated system was used for 
 |---|---|
 | [`run.py`](../run.py) | Environment/configuration, backend selection, aiohttp startup |
 | [`voxck/orchestrator.py`](../voxck/orchestrator.py) | Sessions, turn lifecycle, worker scheduling, history, packet emission |
+| [`voxck/conversation.py`](../voxck/conversation.py) | Private audio/text journals and validated one-use conversation restoration |
 | [`voxck/vad.py`](../voxck/vad.py), [`voxck/asr.py`](../voxck/asr.py) | Turn detection and transcription |
 | [`voxck/persona.py`](../voxck/persona.py), [`personas/ck-gender.md`](../personas/ck-gender.md) | Persona parsing and sourced prompt |
 | [`voxck/llm.py`](../voxck/llm.py) | Streaming answer client and no-thinking request |

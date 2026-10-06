@@ -36,6 +36,8 @@ Screenshot timestamps and demo links are recorded in [frames.json](docs/demo/fra
 - Stream reference-audio-conditioned speech and render the mouth from that same audio.
 - Allow the user to interrupt while a reply is playing; stop obsolete audio and video together.
 - Commit only fully played speech segments to conversation history.
+- Preserve completed microphone input through reply interruptions, and archive audio and full transcripts locally.
+- Restore a saved conversation through a validated one-use seed.
 - Keep a closed-mouth frame during silence; mouth animation follows actual reply playback.
 
 “Distillation” here means **persona research and prompting**. There is no Charlie-specific LLM fine-tuning, and no claim that generated replies are his authentic statements. The interface identifies the speaker as an AI practice partner throughout.
@@ -99,6 +101,20 @@ After preparing those assets:
 ```
 
 Open `http://127.0.0.1:8000`, click **Start**, permit microphone access, and speak. Start/Stop creates a new session. `--local-llm` explicitly selects the local Qwen alternative; API failures do not silently switch brains. The managed service runs Hugging Face loading offline, so finish the downloads first.
+
+## Conversation archives and restoration
+
+Completed speech is saved before transcription to `conversations/session-*/audio/*.wav`. The same session's `events.jsonl` records full user transcripts and the reply segments actually played. A separate FIFO worker transcribes accepted input even when a new utterance interrupts the reply. Consecutive user fragments are combined in the model request; the complete local history is retained while the model uses a bounded recent window.
+
+To resume a selected conversation, prepare `conversations/resume-next.json` before clicking Start:
+
+```json
+{"messages":[{"role":"user","content":"My earlier question."},{"role":"assistant","content":"The reply I heard."}]}
+```
+
+Only `user` and `assistant` messages are accepted. The next connection loads and displays the validated history, then archives the seed as `resume-consumed-*.json`. Invalid seeds are preserved. Restoration waits for new input before generating a reply. Stop drains accepted transcription work before closing its archive. Sessions use private directories/files, and the entire `conversations/` directory is ignored by Git.
+
+These are durable local archives and explicit restoration, not automatic long-term memory across every Stop/Start. Earlier turns outside the model's recent context window are not automatically recalled. See [the input and history fix](docs/ASR-INPUT-FIX-2026-10-05.md).
 
 ## Verification and practical limits
 
